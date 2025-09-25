@@ -1,0 +1,1 @@
+This is a skeleton Android app folder created for the Abhaya Sensor project. It is intentionally minimal and provided as a starting point. Configure Android Gradle Plugin and Kotlin versions to match your workspace when importing into Android Studio.
