@@ -6,20 +6,24 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
-import androidx.compose.material.*
-import androidx.compose.runtime.*
+import androidx.compose.material.MaterialTheme
+import androidx.compose.material.Surface
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.core.content.ContextCompat
 import com.ustadmobile.meshrabiya.sensor.ui.SensorApp
 
+/**
+ * Canonical MainActivity for the sensor app.
+ *
+ * Merged from a module-level legacy copy that used a WebView placeholder and the app-level
+ * Compose activity that requested runtime permissions and showed the composable UI. The
+ * resulting activity keeps the Compose-based UI and the runtime permission bootstrapping.
+ */
 class MainActivity : ComponentActivity() {
     private val requestPermissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        // handle results if needed
-    }
+    ) { /* handle results if needed */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

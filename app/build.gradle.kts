@@ -32,6 +32,15 @@ android {
     namespace = "com.ustadmobile.meshrabiya.sensor"
     kotlin { jvmToolchain(21) }
 
+    // Include the meshrabiya-api module's AIDL sources so the binder stubs are generated
+    // locally for this app (Option A: consumer-side AIDL sourceSets). This avoids needing
+    // variant-aware AAR repackaging and keeps compilation deterministic in the monorepo.
+    sourceSets {
+        getByName("main") {
+            aidl.srcDir(project(":meshrabiya-api").file("src/main/aidl"))
+        }
+    }
+
 }
 
 dependencies {
