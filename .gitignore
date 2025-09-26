@@ -31,3 +31,7 @@ obj/
 
 app/build/
 
+# AIDL generated files
+/build/generated/meshrabiya-aidl/
+
+app/src/main/aidl/com/ustadmobile/meshrabiya/api/
