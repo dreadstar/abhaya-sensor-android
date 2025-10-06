@@ -23,13 +23,23 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import com.ustadmobile.meshrabiya.sensor.stream.LocalStreamIngestor
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import org.abhaya.sensor.meshrabiya.HttpStreamIngestor
 import com.ustadmobile.meshrabiya.sensor.capture.CameraCapture
 import com.ustadmobile.meshrabiya.sensor.capture.AudioCapture
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.camera.view.PreviewView
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+
+// UI-facing ingestor type: exposes the same events flow as the app's in-process ingestor
+private interface UIIngestor : com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor {
+    // Use a simple event descriptor for UI logging (keeps dependency minimal)
+    data class UIEvent(val streamId: String, val timestampMs: Long, val payloadLength: Int)
+    val events: kotlinx.coroutines.flow.SharedFlow<UIEvent>
+}
 
 @Composable
 fun SensorApp() {
@@ -52,8 +62,20 @@ fun SensorApp() {
     var ingestorRunning by remember { mutableStateOf(false) }
     val ingestLog = remember { mutableStateListOf<String>() }
 
-    // Ingestor wiring
-    val ingestor = remember { LocalStreamIngestor() }
+    // Ingestor wiring — always use HttpStreamIngestor for the app and tests
+    val ingestor = remember {
+        val http = HttpStreamIngestor("https://example.com/store", null)
+        val _events = MutableSharedFlow<UIIngestor.UIEvent>(extraBufferCapacity = 100)
+        object : UIIngestor {
+            override val events: SharedFlow<UIIngestor.UIEvent> = _events
+            override fun start() = http.start()
+            override fun stop() = http.stop()
+            override fun ingestSensorReading(streamId: String, timestampMs: Long, payload: ByteArray) {
+                http.ingestSensorReading(streamId, timestampMs, payload)
+                try { _events.tryEmit(UIIngestor.UIEvent(streamId, timestampMs, payload.size)) } catch (_: Throwable) {}
+            }
+        }
+    }
     val listeners = remember { mutableMapOf<String, SensorEventListener>() }
 
     // Do not auto-start; expose controls to the user
@@ -116,9 +138,48 @@ fun SensorApp() {
 
     // UI layout
     val scope = rememberCoroutineScope()
+    // Job for the events collection coroutine so we can cancel it on stop
+    var eventsJob by remember { mutableStateOf<Job?>(null) }
+
+    // Helper functions to start/stop the ingestor and manage the events subscription
+    val startIngestor = {
+        if (!ingestorRunning) {
+            ingestor.start()
+            ingestorRunning = true
+            eventsJob = scope.launch {
+                try {
+                    (ingestor as? UIIngestor)?.events?.collectLatest { ev ->
+                        ingestLog.add(0, "${ev.streamId} @ ${ev.timestampMs} (${ev.payloadLength} bytes)")
+                        if (ingestLog.size > 200) ingestLog.removeLast()
+                    }
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+
+    val stopIngestor = {
+        if (ingestorRunning) {
+            eventsJob?.cancel()
+            eventsJob = null
+            ingestor.stop()
+            ingestorRunning = false
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
-        TopAppBar(title = { Text("Abhaya Sensor") }, actions = {})
+        TopAppBar(title = { Text("Abhaya Sensor") }, actions = {
+            // Status indicator and top-level toggle so it's visible above the selector
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (ingestorRunning) "Running" else "Stopped", color = if (ingestorRunning) Color(0xFF2E7D32) else Color.Gray)
+                Spacer(modifier = Modifier.width(8.dp))
+                if (!ingestorRunning) {
+                    Button(onClick = { startIngestor() }) { Text("Start") }
+                } else {
+                    Button(onClick = { stopIngestor() }) { Text("Stop") }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+            }
+        })
         Spacer(modifier = Modifier.height(8.dp))
 
         // Controls: polling freq
@@ -183,21 +244,9 @@ fun SensorApp() {
                             Text(if (ingestorRunning) "Running" else "Stopped", color = if (ingestorRunning) Color(0xFF2E7D32) else Color.Gray)
                         }
                         Spacer(modifier = Modifier.height(8.dp))
+                        // Control is now surfaced in the TopAppBar. Use that toggle to start/stop ingest.
                         Row {
-                            Button(onClick = {
-                                if (!ingestorRunning) {
-                                    ingestor.start(); ingestorRunning = true
-                                    // subscribe to events
-                                    scope.launch {
-                                        ingestor.events.collectLatest { ev ->
-                                            ingestLog.add(0, "${ev.streamId} @ ${ev.timestampMs} (${ev.payloadLength} bytes)")
-                                            if (ingestLog.size > 200) ingestLog.removeLast()
-                                        }
-                                    }
-                                }
-                            }, enabled = !ingestorRunning) { Text("Start Ingest") }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Button(onClick = { if (ingestorRunning) { ingestor.stop(); ingestorRunning = false } }, enabled = ingestorRunning) { Text("Stop Ingest") }
+                            Text(if (ingestorRunning) "Ingest running via top control" else "Use top Start button to begin ingest")
                         }
                     }
                 }
@@ -236,10 +285,10 @@ fun SensorApp() {
         // Footer controls
         Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Selected: ${selectedSensors.size}")
-            Row {
+                Row {
                 Button(onClick = { selectedSensors = emptySet() }) { Text("Clear") }
                 Spacer(modifier = Modifier.width(8.dp))
-                Button(onClick = { if (!ingestorRunning) { ingestor.start(); ingestorRunning = true } }) { Text("Ensure Ingest Running") }
+                Button(onClick = { startIngestor() }) { Text("Ensure Ingest Running") }
             }
         }
     }

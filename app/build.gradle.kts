@@ -1,3 +1,6 @@
+import com.android.build.gradle.internal.api.ApkVariantOutputImpl
+import java.util.*
+
 plugins {
     id("com.android.application")
     kotlin("android")
@@ -5,19 +8,59 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.2.10"
 }
 
+val sensorBaseVersionCode = 1000000001
+
+fun getVersionName(): String {
+    // Gets the version name from the latest Git tag
+    return providers.exec {
+        commandLine("git", "describe", "--tags", "--always")
+    }.standardOutput.asText.get().trim()
+}
+
 android {
     compileSdk = 36
 
     defaultConfig {
         applicationId = "com.ustadmobile.meshrabiya.sensor"
-    minSdk = 24
-    targetSdk = 36
-        versionCode = 1
-        versionName = "0.1"
+        minSdk = 24
+        targetSdk = 36
+        versionCode = sensorBaseVersionCode
+        versionName = getVersionName()
+        multiDexEnabled = true
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        flavorDimensions += "sensor"
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("x86", "armeabi-v7a", "x86_64", "arm64-v8a")
+            isUniversalApk = true
+        }
     }
 
     buildTypes {
-        getByName("release") { isMinifyEnabled = false }
+        getByName("release") { 
+            isMinifyEnabled = false 
+            isShrinkResources = false
+        }
+        getByName("debug") {
+            isDebuggable = true
+            applicationIdSuffix = ".debug"
+        }
+    }
+
+    productFlavors {
+        create("fullperm") { 
+            dimension = "sensor" 
+        }
+        create("nightly") {
+            dimension = "sensor"
+            // overwrites defaults from defaultConfig
+            applicationId = "com.ustadmobile.meshrabiya.sensor.nightly"
+            versionCode = (Date().time / 1000).toInt()
+        }
     }
 
     composeOptions {
@@ -27,6 +70,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     namespace = "com.ustadmobile.meshrabiya.sensor"
@@ -72,4 +116,44 @@ dependencies {
 
     // Testing
     testImplementation("junit:junit:4.13.2")
+    // Robolectric for Android framework APIs in JVM tests
+    testImplementation("org.robolectric:robolectric:4.11")
+    // Allow referencing the Orbot service implementation in unit tests (Robolectric)
+    testImplementation(project(":orbotservice"))
+    // Include org.json on the test classpath so JSONObject behaves in JVM unit tests
+    testImplementation("org.json:json:20230227")
+    testImplementation("androidx.test:core:1.5.0")
 }
+
+// Increments versionCode by ABI type
+android.applicationVariants.all {
+    outputs.configureEach {
+        if (versionCode == sensorBaseVersionCode) {
+            val incrementMap =
+                mapOf("armeabi-v7a" to 1, "arm64-v8a" to 2, "x86" to 4, "x86_64" to 5)
+            val increment = incrementMap[filters.find { it.filterType == "ABI" }?.identifier] ?: 0
+            (this as ApkVariantOutputImpl).versionCodeOverride = sensorBaseVersionCode + increment
+        }
+    }
+}
+
+// Packaging configuration
+android {
+    packaging {
+        resources {
+            excludes += listOf(
+                "META-INF/androidx.localbroadcastmanager_localbroadcastmanager.version",
+                "**/*.bak"  // Exclude .bak files from APK packaging
+            )
+        }
+    }
+}
+
+// Allow unit tests to use Android framework resources and classes (required for ParcelFileDescriptor.createPipe)
+android {
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+    }
+}
+
+
