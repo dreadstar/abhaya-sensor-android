@@ -76,6 +76,12 @@ android {
     namespace = "com.ustadmobile.meshrabiya.sensor"
     kotlin { jvmToolchain(21) }
 
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+        isCoreLibraryDesugaringEnabled = true
+    }
+
     // Include the meshrabiya-api module's AIDL sources so the binder stubs are generated
     // locally for this app (Option A: consumer-side AIDL sourceSets). This avoids needing
     // variant-aware AAR repackaging and keeps compilation deterministic in the monorepo.
@@ -123,6 +129,18 @@ dependencies {
     // Include org.json on the test classpath so JSONObject behaves in JVM unit tests
     testImplementation("org.json:json:20230227")
     testImplementation("androidx.test:core:1.5.0")
+    
+    // Android Instrumentation Testing
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test:rules:1.5.0")
+    // For AIDL service testing on actual Android devices/emulators
+    androidTestImplementation(project(":orbotservice"))
+    androidTestImplementation(project(":meshrabiya-api"))
+    
+    // Core library desugaring (required by Meshrabiya lib)
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 }
 
 // Increments versionCode by ABI type
