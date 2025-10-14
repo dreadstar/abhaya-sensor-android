@@ -1,0 +1,98 @@
+Abhaya Sensor Android Application  
+Copyright © 2025 Tyrone Thomas/BreakThrough Technologies
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+================================================================================
+
+THIRD-PARTY COMPONENTS
+
+This application includes the following third-party components:
+
+1. MESHRABIYA API (LGPL-3.0)
+   - AIDL interfaces for mesh networking
+   - Copyright © 2025 Tyrone Thomas/BreakThrough Technologies
+   - License: GNU Lesser General Public License v3.0
+   - Source: Local project module (meshrabiya-api)
+
+   ⚠️  LGPL NOTICE: This application dynamically links to Meshrabiya API.
+       The API interfaces allow applications to use any license while
+       ensuring API improvements remain open source.
+
+2. ANDROID CAMERAX (Apache-2.0)
+   - Camera lifecycle management and preview
+   - Copyright © The Android Open Source Project
+   - License: Apache License 2.0
+   - Components: Camera2, CameraX Core, CameraX Lifecycle, CameraX View
+
+3. JETPACK COMPOSE (Apache-2.0)
+   - Modern Android UI toolkit
+   - Copyright © The Android Open Source Project  
+   - License: Apache License 2.0
+   - Components: Compose UI, Material3, Activity Compose, Navigation
+
+4. ANDROIDX LIBRARIES (Apache-2.0)
+   - Android core and lifecycle libraries
+   - Copyright © The Android Open Source Project
+   - License: Apache License 2.0
+   - Components: Core KTX, Lifecycle, AppCompat, Work Manager
+
+5. KOTLIN (Apache-2.0)
+   - Programming language and standard library
+   - Copyright © JetBrains and Kotlin contributors
+   - License: Apache License 2.0
+   - Components: Kotlin stdlib, Coroutines
+
+6. ACCOMPANIST (Apache-2.0)
+   - Compose utilities library
+   - Copyright © The Android Open Source Project
+   - License: Apache License 2.0
+   - Components: Permissions, System UI Controller
+
+================================================================================
+
+NETWORK SERVICE NOTICE (AGPL-3.0 Requirement)
+
+If you interact with this software through a network, you have the right to
+receive the complete source code of this application. The source code is
+available at: https://github.com/dreadstar/abhaya-sensor-android
+
+================================================================================
+
+SENSOR DATA PRIVACY
+
+This application collects sensor data (camera, accelerometer, gyroscope, etc.)
+for mesh networking and distributed computing purposes. All data processing
+respects user privacy and follows data protection regulations. For detailed
+privacy information, see the Privacy Policy in the app settings.
+
+================================================================================
+
+LICENSE FILES
+
+The complete license texts are available in this licenses/ directory:
+- AGPL-3.0.txt: GNU Affero General Public License v3.0
+- LGPL-3.0.txt: GNU Lesser General Public License v3.0  
+- Apache-2.0.txt: Apache License 2.0
+
+For detailed licensing information and compliance requirements, see:
+https://github.com/dreadstar/abhaya-sensor-android/blob/master/THIRD_PARTY_LICENSES.md
+
+================================================================================
+
+QUESTIONS
+
+For questions about licensing or to report license compliance issues:
+- Sensor App Issues: https://github.com/dreadstar/abhaya-sensor-android/issues
+- Main Project: https://github.com/dreadstar/orbot-abhaya-android/issues

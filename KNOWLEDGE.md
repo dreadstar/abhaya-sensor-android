@@ -106,20 +106,5 @@ This document adapts the existing mesh-network media streaming architecture to s
 - MediaCodec / MediaRecorder for efficient encoding
 - Orbot's DistributedStorageAgent for chunked/replicated storage
 
----
-
-### Rejected / deferred suggestion (2025-09-29)
-
-- Suggestion: Introduce a small shared `StreamIngestorProvider` interface in a common module so the sensor UI can obtain an ingestor (HTTP, in-process, or test stub) without depending on host app concrete classes.
-
-  Decision: Deferred / REJECTED (for now).
-
-  Rationale:
-  - The current selection algorithm returns mesh addresses/offers; the sensor can instantiate `HttpStreamIngestor` pointed at the selected mesh address (including the local device) and satisfy the "use the mesh address" requirement without adding cross-module APIs.
-  - Introducing the provider now would add cross-module API surface and lifecycle/injection complexity that isn't justified until we have a concrete need (e.g., stable in-process optimization or improved testability).
-  - A reflective bridging approach is acceptable during prototyping but is brittle and should not be considered a long-term substitute for a proper API.
-
-  Future: If we later require in-process ingestion or clearer injection points for tests, create a tiny `StreamIngestorProvider` in `meshrabiya-api` (or a small shared module), implement it in the host app, and update the sensor module to consume it. Record the migration steps and tests in a future KNOWLEDGE update.
-
 
 *End of document.*

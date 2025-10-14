@@ -102,7 +102,9 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.7.2")
     implementation("androidx.compose.ui:ui:1.6.0")
     implementation("androidx.compose.material:material:1.6.0")
+    implementation("androidx.compose.material:material-icons-extended:1.6.0")
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.0")
+    implementation("com.google.accompanist:accompanist-flowlayout:0.30.1")
 
     // Lifecycle
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.6.1")
@@ -110,6 +112,9 @@ dependencies {
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // Networking - OkHttp for HTTP stream ingestor
+    implementation("com.squareup.okhttp3:okhttp:4.11.0")
 
     // CameraX (placeholder)
     implementation("androidx.camera:camera-core:1.2.2")
@@ -130,11 +135,43 @@ dependencies {
     testImplementation("org.json:json:20230227")
     testImplementation("androidx.test:core:1.5.0")
     
-    // Android Instrumentation Testing
+    // Android Instrumentation Testing - Core
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation("androidx.test:runner:1.5.2")
     androidTestImplementation("androidx.test:rules:1.5.0")
+    androidTestImplementation("androidx.test:core:1.5.0")
+    
+    // UI Testing - Compose and Espresso
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.6.0")
+    androidTestImplementation("androidx.compose.ui:ui-test-manifest:1.6.0")
+    androidTestImplementation("androidx.test.espresso:espresso-intents:3.5.1")
+    androidTestImplementation("androidx.test.espresso:espresso-contrib:3.5.1")
+    
+    // Camera Testing - using mock-based approach instead of camera-testing library
+    // androidTestImplementation("androidx.camera:camera-testing:1.1.0")  // Not available
+    
+    // Lifecycle and Architecture Testing
+    androidTestImplementation("androidx.arch.core:core-testing:2.2.0")
+    androidTestImplementation("androidx.lifecycle:lifecycle-runtime-testing:2.6.1")
+    
+    // Permissions Testing
+    androidTestImplementation("androidx.test:core-ktx:1.5.0")
+    androidTestImplementation("androidx.test.ext:junit-ktx:1.1.5")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.2.0")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    
+    // Coroutines Testing
+    androidTestImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+    
+    // MockK for mocking in instrumentation tests  
+    androidTestImplementation("io.mockk:mockk-android:1.13.8") {
+        exclude(group = "io.mockk", module = "mockk-agent-android")
+    }
+    
+    // Hamcrest matchers for better assertions
+    androidTestImplementation("org.hamcrest:hamcrest:2.2")
+    
     // For AIDL service testing on actual Android devices/emulators
     androidTestImplementation(project(":orbotservice"))
     androidTestImplementation(project(":meshrabiya-api"))
@@ -161,6 +198,8 @@ android {
         resources {
             excludes += listOf(
                 "META-INF/androidx.localbroadcastmanager_localbroadcastmanager.version",
+                "META-INF/LICENSE.md",  // Exclude JUnit Jupiter LICENSE conflicts
+                "META-INF/LICENSE-notice.md",  // Exclude JUnit Jupiter LICENSE-notice conflicts
                 "**/*.bak"  // Exclude .bak files from APK packaging
             )
         }

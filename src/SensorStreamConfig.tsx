@@ -197,24 +197,14 @@ const SensorStreamingUI: React.FC = () => {
       alert('Please select at least one sensor or metric to stream.');
       return;
     }
-    // Begin streaming: update state and start camera/audio previews if configured
     setIsStreaming(true);
-    if (cameraConfig.enabled) {
-      // attempt to start camera preview when streaming starts
-      startCameraPreview().catch(() => {});
-    }
-    if (audioConfig.enabled) {
-      // audio monitoring will begin via useEffect when isStreaming is true
-    }
   };
 
   const stopStreaming = (): void => {
-    // Stop streaming and any active captures/previews
     setIsStreaming(false);
     if (cameraPreview) {
-      try { stopCameraPreview(); } catch (_: any) {}
+      stopCameraPreview();
     }
-    // Additional cleanup for audio or other captures can be added here
   };
 
   // Camera and audio management
@@ -249,7 +239,7 @@ const SensorStreamingUI: React.FC = () => {
   };
 
   const updateCameraConfig = (updates: Partial<CameraConfig>): void => {
-    setCameraConfig((prev: CameraConfig) => ({ ...prev, ...updates }));
+    setCameraConfig(prev => ({ ...prev, ...updates }));
     if (cameraPreview && (updates.camera || updates.frameRate || updates.aspectRatio)) {
       stopCameraPreview();
       setTimeout(startCameraPreview, 100);
@@ -257,7 +247,7 @@ const SensorStreamingUI: React.FC = () => {
   };
 
   const updateAudioConfig = (updates: Partial<AudioConfig>): void => {
-    setAudioConfig((prev: AudioConfig) => ({ ...prev, ...updates }));
+    setAudioConfig(prev => ({ ...prev, ...updates }));
   };
 
   // Simulate sound level monitoring
@@ -549,15 +539,10 @@ const SensorStreamingUI: React.FC = () => {
       {/* Sensors Selection */}
       <div className="flex-1 p-4">
         <div className="flex items-center justify-between mb-4">
-          <div>
-            <h2 className="text-lg font-semibold">Select Sensors & Metrics</h2>
-            <div className="text-xs text-gray-400">Status: <span className={`font-medium ${isStreaming ? 'text-green-300' : 'text-gray-300'}`}>{isStreaming ? 'Streaming' : 'Idle'}</span></div>
-          </div>
-          <div className="flex items-center space-x-3">
-            <span className="text-sm text-gray-400 bg-white/10 px-2 py-1 rounded-full">{selectedSensors.size} selected</span>
-            <button onClick={stopStreaming} className="px-3 py-1 rounded bg-red-600/80 text-sm">Stop</button>
-            <button onClick={startStreaming} className="px-3 py-1 rounded bg-green-600/80 text-sm">Start</button>
-          </div>
+          <h2 className="text-lg font-semibold">Select Sensors & Metrics</h2>
+          <span className="text-sm text-gray-400 bg-white/10 px-2 py-1 rounded-full">
+            {selectedSensors.size} selected
+          </span>
         </div>
 
         <div className="space-y-3">

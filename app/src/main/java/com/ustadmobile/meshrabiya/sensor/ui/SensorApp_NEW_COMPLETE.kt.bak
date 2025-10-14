@@ -1,0 +1,1035 @@
+package com.ustadmobile.meshrabiya.sensor.ui
+
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.Manifest
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import com.google.accompanist.permissions.ExperimentalPermissionsApi
+import com.google.accompanist.permissions.rememberMultiplePermissionsState
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
+import org.abhaya.sensor.meshrabiya.HttpStreamIngestor
+import com.ustadmobile.meshrabiya.sensor.capture.CameraCapture
+import com.ustadmobile.meshrabiya.sensor.capture.AudioCapture
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.random.Random
+
+// UI-facing ingestor type: exposes the same events flow as the app's in-process ingestor
+private interface UIIngestor : com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor {
+    data class UIEvent(val streamId: String, val timestampMs: Long, val payloadLength: Int)
+    val events: SharedFlow<UIEvent>
+}
+
+private data class SensorCategory(val id: String, val name: String, val icon: ImageVector, val sensors: List<SensorItem>)
+private data class SensorItem(val id: String, val name: String, val description: String)
+
+@OptIn(ExperimentalPermissionsApi::class)
+@Composable
+fun SensorApp() {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val sensorManager = remember { context.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
+    
+    // Discover available hardware sensors
+    val hardwareSensors = remember { mutableStateMapOf<String, Sensor>() }
+    LaunchedEffect(Unit) {
+        sensorManager.getSensorList(Sensor.TYPE_ALL).forEach { s ->
+            val id = s.stringType ?: "sensor_${s.type}"
+            hardwareSensors[id] = s
+        }
+    }
+    
+    // UI State
+    var ingestorRunning by remember { mutableStateOf(false) }
+    var pollingFrequency by remember { mutableStateOf(10) }
+    val selectedSensors = remember { mutableStateSetOf<String>() }
+    val expandedCategories = remember { mutableStateSetOf<String>("motion") }
+    val ingestLog = remember { mutableStateListOf<String>() }
+    var cameraPreview by remember { mutableStateOf(false) }
+    var currentSoundLevel by remember { mutableStateOf(0f) }
+    
+    // Permissions
+    val permissions = rememberMultiplePermissionsState(
+        listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+    )
+    
+    // Ingestor wiring — always use HttpStreamIngestor
+    val ingestor = remember {
+        val http = HttpStreamIngestor("https://example.com/store", null)
+        val _events = MutableSharedFlow<UIIngestor.UIEvent>(extraBufferCapacity = 100)
+        object : UIIngestor {
+            override val events: SharedFlow<UIIngestor.UIEvent> = _events
+            override fun start() = http.start()
+            override fun stop() = http.stop()
+            override fun ingestSensorReading(streamId: String, timestampMs: Long, payload: ByteArray) {
+                http.ingestSensorReading(streamId, timestampMs, payload)
+                try { _events.tryEmit(UIIngestor.UIEvent(streamId, timestampMs, payload.size)) } catch (_: Throwable) {}
+            }
+        }
+    }
+    
+    val listeners = remember { mutableMapOf<String, SensorEventListener>() }
+    
+    // Camera and audio capture controllers
+    val cameraController = remember { CameraCapture(context, lifecycleOwner, ingestor) }
+    val audioController = remember { AudioCapture(ingestor) }
+    
+    // Cleanup
+    DisposableEffect(Unit) {
+        onDispose {
+            listeners.values.forEach { sensorManager.unregisterListener(it) }
+            listeners.clear()
+            cameraController.stop()
+            audioController.stop()
+            if (ingestorRunning) ingestor.stop()
+        }
+    }
+    
+    // When selection changes: register/unregister hardware sensor listeners
+    LaunchedEffect(selectedSensors.size, hardwareSensors.keys.size) {
+        val hwIds = hardwareSensors.keys
+        val toRegister = selectedSensors.filter { it in hwIds } - listeners.keys
+        val toUnregister = listeners.keys - selectedSensors
+
+        toUnregister.forEach { id ->
+            listeners[id]?.let { sensorManager.unregisterListener(it) }
+            listeners.remove(id)
+        }
+
+        toRegister.forEach { id ->
+            val sensor = hardwareSensors[id] ?: return@forEach
+            val listener = object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent?) {
+                    if (event == null) return
+                    try {
+                        val payload = floatsToByteArray(event.values)
+                        val ts = System.currentTimeMillis()
+                        ingestor.ingestSensorReading(id, ts, payload)
+                    } catch (_: Exception) {}
+                }
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+            }
+            sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+            listeners[id] = listener
+        }
+    }
+    
+    // Camera and audio management
+    LaunchedEffect(selectedSensors.size) {
+        if (selectedSensors.contains("camera_stream")) {
+            cameraController.start(periodicSeconds = 5)
+        } else {
+            cameraController.stop()
+            cameraPreview = false
+        }
+
+        if (selectedSensors.contains("audio_stream")) {
+            audioController.start()
+        } else {
+            audioController.stop()
+        }
+    }
+    
+    // Simulate sound level for visualization
+    LaunchedEffect(selectedSensors.contains("audio_stream"), ingestorRunning) {
+        if (selectedSensors.contains("audio_stream") && ingestorRunning) {
+            while (true) {
+                currentSoundLevel = Random.nextFloat() * 100f
+                delay(100)
+            }
+        } else {
+            currentSoundLevel = 0f
+        }
+    }
+    
+    // Event log collection
+    val scope = rememberCoroutineScope()
+    var eventsJob by remember { mutableStateOf<Job?>(null) }
+    
+    val startIngestor = {
+        if (!ingestorRunning) {
+            ingestor.start()
+            ingestorRunning = true
+            eventsJob = scope.launch {
+                try {
+                    (ingestor as? UIIngestor)?.events?.collectLatest { ev ->
+                        ingestLog.add(0, "${ev.streamId} @ ${ev.timestampMs} (${ev.payloadLength} bytes)")
+                        if (ingestLog.size > 200) ingestLog.removeLast()
+                    }
+                } catch (_: Throwable) {}
+            }
+        }
+    }
+    
+    val stopIngestor = {
+        if (ingestorRunning) {
+            eventsJob?.cancel()
+            eventsJob = null
+            ingestor.stop()
+            ingestorRunning = false
+            cameraPreview = false
+        }
+    }
+    
+    val sensorCategories = remember {
+        listOf(
+            SensorCategory(
+                "motion", "Motion Sensors", Icons.Default.Sensors,
+                listOf(
+                    SensorItem("sensor_${Sensor.TYPE_ACCELEROMETER}", "Accelerometer", "Device acceleration (m/s²)"),
+                    SensorItem("sensor_${Sensor.TYPE_GYROSCOPE}", "Gyroscope", "Rotation rate (rad/s)"),
+                    SensorItem("sensor_${Sensor.TYPE_MAGNETIC_FIELD}", "Magnetometer", "Magnetic field (μT)"),
+                    SensorItem("sensor_${Sensor.TYPE_LINEAR_ACCELERATION}", "Linear Acceleration", "Acceleration without gravity"),
+                )
+            ),
+            SensorCategory(
+                "environmental", "Environmental", Icons.Default.Thermostat,
+                listOf(
+                    SensorItem("sensor_${Sensor.TYPE_AMBIENT_TEMPERATURE}", "Ambient Temperature", "Room temperature (°C)"),
+                    SensorItem("sensor_${Sensor.TYPE_PRESSURE}", "Pressure", "Atmospheric pressure (hPa)"),
+                    SensorItem("sensor_${Sensor.TYPE_RELATIVE_HUMIDITY}", "Humidity", "Relative humidity (%)"),
+                    SensorItem("sensor_${Sensor.TYPE_LIGHT}", "Light", "Ambient light (lx)"),
+                )
+            ),
+            SensorCategory(
+                "media", "Camera & Audio", Icons.Default.CameraAlt,
+                listOf(
+                    SensorItem("camera_stream", "Camera Stream", "Video capture with controls"),
+                    SensorItem("audio_stream", "Audio Stream", "Audio capture with threshold"),
+                    SensorItem("periodic_photos", "Periodic Photos", "Timed photo capture"),
+                )
+            ),
+            SensorCategory(
+                "system", "System Metrics", Icons.Default.PhoneAndroid,
+                listOf(
+                    SensorItem("sensor_${Sensor.TYPE_HEART_BEAT}", "Heart Beat", "Heartbeat detection"),
+                    SensorItem("sensor_${Sensor.TYPE_STEP_COUNTER}", "Step Counter", "Steps since reboot"),
+                    SensorItem("sensor_${Sensor.TYPE_PROXIMITY}", "Proximity", "Distance to object (cm)"),
+                )
+            )
+        )
+    }
+    
+    // Modern UI with gradient background
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFF1E293B),
+                        Color(0xFF581C87),
+                        Color(0xFF1E293B)
+                    )
+                )
+            )
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Header
+            AppHeader(isStreaming = ingestorRunning, selectedCount = selectedSensors.size)
+            
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // Camera Configuration Panel
+                if (selectedSensors.contains("camera_stream") || selectedSensors.contains("periodic_photos")) {
+                    CameraConfigurationPanel(
+                        cameraPreview = cameraPreview,
+                        onPreviewToggle = { 
+                            cameraPreview = !cameraPreview
+                            if (cameraPreview) {
+                                cameraController.start(periodicSeconds = 5)
+                            }
+                        },
+                        lifecycleOwner = lifecycleOwner,
+                        hasPermission = permissions.allPermissionsGranted,
+                        requestPermission = { permissions.launchMultiplePermissionRequest() },
+                        cameraController = cameraController
+                    )
+                }
+                
+                // Audio Configuration Panel
+                if (selectedSensors.contains("audio_stream")) {
+                    AudioConfigurationPanel(
+                        currentSoundLevel = currentSoundLevel,
+                        isStreaming = ingestorRunning
+                    )
+                }
+                
+                // Polling Frequency Section
+                PollingFrequencySection(
+                    pollingFrequency = pollingFrequency,
+                    onFrequencyChange = { pollingFrequency = it }
+                )
+                
+                // Sensors Selection
+                SensorsSelectionSection(
+                    sensorCategories = sensorCategories,
+                    selectedSensors = selectedSensors,
+                    expandedCategories = expandedCategories,
+                    hardwareSensors = hardwareSensors
+                )
+                
+                // Event Log
+                EventLogSection(ingestLog = ingestLog)
+            }
+            
+            // Control Buttons
+            ControlButtons(
+                isStreaming = ingestorRunning,
+                selectedCount = selectedSensors.size,
+                pollingFrequency = pollingFrequency,
+                onStartStop = {
+                    if (ingestorRunning) {
+                        stopIngestor()
+                    } else {
+                        if (selectedSensors.isNotEmpty()) {
+                            startIngestor()
+                        }
+                    }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun AppHeader(isStreaming: Boolean, selectedCount: Int) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color.Black.copy(alpha = 0.3f),
+        tonalElevation = 8.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(Color(0xFF8B5CF6), Color(0xFF3B82F6))
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Sensors,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Column {
+                    Text(
+                        "Abhaya Sensor Stream",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        "$selectedCount sensors selected",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.7f)
+                    )
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+                val alpha by infiniteTransition.animateFloat(
+                    initialValue = 1f,
+                    targetValue = 0.3f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(1000),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "alpha"
+                )
+                
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .background(
+                            if (isStreaming) Color(0xFF4ADE80).copy(alpha = alpha) 
+                            else Color(0xFF9CA3AF),
+                            shape = CircleShape
+                        )
+                )
+                Text(
+                    if (isStreaming) "Streaming" else "Idle",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun CameraConfigurationPanel(
+    cameraPreview: Boolean,
+    onPreviewToggle: () -> Unit,
+    lifecycleOwner: LifecycleOwner,
+    hasPermission: Boolean,
+    requestPermission: () -> Unit,
+    cameraController: CameraCapture
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        color = Color.Black.copy(alpha = 0.2f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(bottom = 16.dp)
+            ) {
+                Icon(
+                    Icons.Default.CameraAlt,
+                    contentDescription = null,
+                    tint = Color(0xFF60A5FA),
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    "Camera Configuration",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+            }
+            
+            // Camera Preview
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.Black)
+            ) {
+                if (cameraPreview && hasPermission) {
+                    AndroidView(
+                        factory = { ctx ->
+                            PreviewView(ctx)
+                        },
+                        update = { pv ->
+                            cameraController.start(pv)
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            Icons.Default.CameraAlt,
+                            contentDescription = null,
+                            tint = Color.White.copy(alpha = 0.3f),
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            if (!hasPermission) "Camera Permission Required" else "Camera Preview",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.5f)
+                        )
+                        if (!hasPermission) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(onClick = requestPermission) {
+                                Text("Grant Permission")
+                            }
+                        }
+                    }
+                }
+                
+                // Camera Controls Overlay
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    IconButton(
+                        onClick = onPreviewToggle,
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(
+                                if (cameraPreview) Color(0xFFEF4444).copy(alpha = 0.8f)
+                                else Color(0xFF10B981).copy(alpha = 0.8f),
+                                shape = CircleShape
+                            )
+                    ) {
+                        Icon(
+                            if (cameraPreview) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AudioConfigurationPanel(
+    currentSoundLevel: Float,
+    isStreaming: Boolean
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        color = Color.Black.copy(alpha = 0.2f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(bottom = 16.dp)
+            ) {
+                Icon(
+                    Icons.Default.Mic,
+                    contentDescription = null,
+                    tint = Color(0xFF10B981),
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    "Audio Configuration",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+            }
+            
+            if (isStreaming) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Current Level: ${"%.1f".format(currentSoundLevel)}%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.7f)
+                    )
+                    Text(
+                        if (currentSoundLevel > 30) "Recording" else "Silent",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (currentSoundLevel > 30) 
+                            Color(0xFF10B981) else Color(0xFFEF4444)
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .background(Color(0xFF374151), shape = RoundedCornerShape(4.dp))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(currentSoundLevel / 100f)
+                            .background(
+                                if (currentSoundLevel > 30) 
+                                    Color(0xFF10B981) else Color(0xFF6B7280),
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                    )
+                }
+            } else {
+                Text(
+                    "Start streaming to see audio levels",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.5f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun PollingFrequencySection(
+    pollingFrequency: Int,
+    onFrequencyChange: (Int) -> Unit
+) {
+    val frequencyOptions = listOf(
+        1 to ("1 Hz" to "Very slow"),
+        5 to ("5 Hz" to "Slow"),
+        10 to ("10 Hz" to "Normal"),
+        25 to ("25 Hz" to "Fast"),
+        50 to ("50 Hz" to "Very fast"),
+        100 to ("100 Hz" to "Maximum")
+    )
+    
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        color = Color.Black.copy(alpha = 0.2f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(bottom = 16.dp)
+            ) {
+                Icon(
+                    Icons.Default.Settings,
+                    contentDescription = null,
+                    tint = Color(0xFFA78BFA),
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    "Polling Frequency",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+            }
+            
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                frequencyOptions.chunked(2).forEach { row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        row.forEach { (freq, labelPair) ->
+                            val (label, desc) = labelPair
+                            Surface(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { onFrequencyChange(freq) },
+                                color = if (pollingFrequency == freq) 
+                                    Color(0xFF8B5CF6).copy(alpha = 0.3f) 
+                                else 
+                                    Color.White.copy(alpha = 0.05f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp)
+                                ) {
+                                    Text(
+                                        label,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
+                                        color = Color.White
+                                    )
+                                    Text(
+                                        desc,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.White.copy(alpha = 0.6f),
+                                        modifier = Modifier.padding(top = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun SensorsSelectionSection(
+    sensorCategories: List<SensorCategory>,
+    selectedSensors: MutableSet<String>,
+    expandedCategories: MutableSet<String>,
+    hardwareSensors: Map<String, Sensor>
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Select Sensors & Metrics",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            )
+            Surface(
+                color = Color.White.copy(alpha = 0.1f),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Text(
+                    "${selectedSensors.size} selected",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
+        }
+        
+        sensorCategories.forEach { category ->
+            val selectedCount = category.sensors.count { selectedSensors.contains(it.id) && 
+                (it.id in listOf("camera_stream", "audio_stream", "periodic_photos") || hardwareSensors.containsKey(it.id)) }
+            val availableCount = category.sensors.count { 
+                it.id in listOf("camera_stream", "audio_stream", "periodic_photos") || hardwareSensors.containsKey(it.id) 
+            }
+            
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = Color.White.copy(alpha = 0.05f),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column {
+                    // Header
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (expandedCategories.contains(category.id)) {
+                                    expandedCategories.remove(category.id)
+                                } else {
+                                    expandedCategories.add(category.id)
+                                }
+                            }
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                category.icon,
+                                contentDescription = null,
+                                tint = Color(0xFFA78BFA),
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column {
+                                Text(
+                                    category.name,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Medium,
+                                    color = Color.White
+                                )
+                                Text(
+                                    "$selectedCount/$availableCount selected",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (selectedCount > 0) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(Color(0xFF10B981), shape = CircleShape)
+                                )
+                            }
+                            Icon(
+                                if (expandedCategories.contains(category.id)) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = Color.White,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    
+                    // Expanded Content
+                    AnimatedVisibility(visible = expandedCategories.contains(category.id)) {
+                        Column {
+                            HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+                            
+                            // Sensor List
+                            Column(
+                                modifier = Modifier.padding(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                category.sensors.forEach { sensor ->
+                                    val available = when (sensor.id) {
+                                        "camera_stream", "audio_stream", "periodic_photos" -> true
+                                        else -> hardwareSensors.containsKey(sensor.id)
+                                    }
+                                    if (!available) return@forEach
+                                    
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                if (selectedSensors.contains(sensor.id)) {
+                                                    selectedSensors.remove(sensor.id)
+                                                } else {
+                                                    selectedSensors.add(sensor.id)
+                                                }
+                                            }
+                                            .padding(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Checkbox(
+                                            checked = selectedSensors.contains(sensor.id),
+                                            onCheckedChange = {
+                                                if (it) {
+                                                    selectedSensors.add(sensor.id)
+                                                } else {
+                                                    selectedSensors.remove(sensor.id)
+                                                }
+                                            },
+                                            colors = CheckboxDefaults.colors(
+                                                checkedColor = Color(0xFF8B5CF6),
+                                                uncheckedColor = Color.White.copy(alpha = 0.3f)
+                                            )
+                                        )
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                sensor.name,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = FontWeight.Medium,
+                                                color = Color.White
+                                            )
+                                            Text(
+                                                sensor.description,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = Color.White.copy(alpha = 0.6f)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EventLogSection(ingestLog: List<String>) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+            .heightIn(max = 200.dp),
+        color = Color.Black.copy(alpha = 0.2f),
+        shape = RoundedCornerShape(16.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.padding(bottom = 8.dp)
+            ) {
+                Icon(
+                    Icons.Default.List,
+                    contentDescription = null,
+                    tint = Color(0xFFA78BFA),
+                    modifier = Modifier.size(20.dp)
+                )
+                Text(
+                    "Event Log",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                if (ingestLog.isEmpty()) {
+                    Text(
+                        "No events yet. Start streaming to see activity.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.5f)
+                    )
+                } else {
+                    ingestLog.forEach { l ->
+                        Text(
+                            l,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.8f),
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ControlButtons(
+    isStreaming: Boolean,
+    selectedCount: Int,
+    pollingFrequency: Int,
+    onStartStop: () -> Unit
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = Color.Black.copy(alpha = 0.3f),
+        tonalElevation = 8.dp
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Button(
+                onClick = onStartStop,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isStreaming) 
+                        Color(0xFFEF4444) else Color(0xFF10B981)
+                ),
+                shape = RoundedCornerShape(12.dp),
+                enabled = selectedCount > 0 || isStreaming
+            ) {
+                Icon(
+                    if (isStreaming) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    if (isStreaming) "Stop Streaming" else "Start Streaming",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            
+            if (selectedCount > 0) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Surface(
+                    color = Color.White.copy(alpha = 0.05f),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "Configuration Summary:",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White.copy(alpha = 0.9f)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "• Frequency: $pollingFrequency Hz ($pollingFrequency/sec)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            "• Sensors: $selectedCount selected",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White.copy(alpha = 0.7f)
+                        )
+                        if (isStreaming) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+                                val alpha by infiniteTransition.animateFloat(
+                                    initialValue = 1f,
+                                    targetValue = 0.3f,
+                                    animationSpec = infiniteRepeatable(
+                                        animation = tween(1000),
+                                        repeatMode = RepeatMode.Reverse
+                                    ),
+                                    label = "alpha"
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .background(
+                                            Color(0xFF10B981).copy(alpha = alpha),
+                                            shape = CircleShape
+                                        )
+                                )
+                                Text(
+                                    "Actively streaming data...",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFF10B981)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun floatsToByteArray(values: FloatArray): ByteArray {
+    val bb = ByteBuffer.allocate(4 * values.size).order(ByteOrder.nativeOrder())
+    for (v in values) bb.putFloat(v)
+    return bb.array()
+}

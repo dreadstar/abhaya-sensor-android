@@ -1,0 +1,71 @@
+abhaya-sensor-android - Sensor Data Capture and Streaming
+Copyright © 2025 Tyrone Thomas/BreakThrough Technologies
+
+Licensed under GNU Affero General Public License v3.0
+See LICENSE file for full license text.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+================================================================================
+THIRD-PARTY COMPONENTS
+================================================================================
+
+This software incorporates the following third-party components:
+
+1. Meshrabiya - Virtual Mesh Networking Library
+   Copyright © UstadMobile FZ-LLC
+   Licensed under: LGPL-3.0
+   Source: https://github.com/UstadMobile/Meshrabiya
+   Our Fork: https://github.com/dreadstar/Meshrabiya
+   
+   ⚠️ LGPL NOTICE: Used as dynamically linked library.
+   Users may replace with modified versions.
+
+2. Android CameraX
+   Copyright © The Android Open Source Project
+   Licensed under: Apache License 2.0
+   Components: camera-core, camera-camera2, camera-lifecycle, camera-view
+
+3. Jetpack Compose
+   Copyright © The Android Open Source Project
+   Licensed under: Apache License 2.0
+   Components: compose.ui, compose.material, material-icons-extended
+
+4. AndroidX Libraries
+   Copyright © The Android Open Source Project
+   Licensed under: Apache License 2.0
+   Components: core-ktx, appcompat, lifecycle, activity
+
+5. Kotlin
+   Copyright © JetBrains s.r.o.
+   Licensed under: Apache License 2.0
+   Components: Kotlin Standard Library, Kotlin Coroutines
+
+6. Google Accompanist
+   Copyright © Google LLC
+   Licensed under: Apache License 2.0
+   Components: accompanist-flowlayout
+
+For complete license texts, see THIRD_PARTY_LICENSES.md
+
+================================================================================
+NETWORK SERVICE NOTICE (AGPL-3.0)
+================================================================================
+
+This application is licensed under AGPLv3. If you run a modified version as a
+network service, you must make the source code available to users.
+
+See: https://www.gnu.org/licenses/why-affero-gpl.html
+
+================================================================================

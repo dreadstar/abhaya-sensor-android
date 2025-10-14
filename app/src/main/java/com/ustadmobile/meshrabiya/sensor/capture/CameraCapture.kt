@@ -1,93 +1,209 @@
 package com.ustadmobile.meshrabiya.sensor.capture
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import android.util.Size
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
 import com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor
-import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
 /**
- * Minimal Camera capture that grabs ImageProxy frames and forwards NV21 byte buffers
- * as a simple segment to the StreamIngestor. This is a lightweight example and not
- * production-ready (no encoding, no chunking, no format negotiation).
+ * Camera capture that grabs ImageProxy frames and forwards byte buffers
+ * to the StreamIngestor, with live preview support.
  */
 class CameraCapture(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner,
     private val ingestor: StreamIngestor
 ) {
+    companion object {
+        private const val TAG = "CameraCapture"
+    }
+    
     private val cameraThread = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var camera: Camera? = null
+    private var currentPreviewView: PreviewView? = null
+    private var currentLensFacing = CameraSelector.LENS_FACING_BACK
+    
+    // Flash mode enum with three states
+    enum class FlashMode {
+        OFF,    // No flash
+        ON,     // Always flash
+        AUTO    // Flash when needed
+    }
+    
+    private var flashMode = FlashMode.OFF
+    
     // When true the analyzer will forward the next available frame to the ingestor
     @Volatile
     private var captureNextFrame = false
 
     /**
      * Start camera capturing. If `previewView` is provided the Preview use case will render to it.
-     * This method returns quickly and performs camera init on a background thread.
+     * Must be called from main thread or will post to main thread.
      */
     fun start(previewView: PreviewView? = null, periodicSeconds: Int = 5) {
-        // initialize on camera thread to avoid blocking UI
-        cameraThread.execute {
-            try {
-                val provider = ProcessCameraProvider.getInstance(context).get()
-                cameraProvider = provider
-
-                val preview = Preview.Builder().build()
-                previewView?.let { preview.setSurfaceProvider(it.surfaceProvider) }
-
-        imageCapture = ImageCapture.Builder()
-            .setTargetResolution(Size(1280, 720))
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .build()
-
-        imageAnalysis = ImageAnalysis.Builder()
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .build()
-
-                imageAnalysis?.setAnalyzer(cameraThread) { imageProxy ->
-            try {
-                val buffer = imageProxy.planes[0].buffer
-                val bytes = ByteArray(buffer.remaining())
-                buffer.get(bytes)
-                val ts = System.currentTimeMillis()
-                // Always send analysis frames when periodic operation is active
-                if (captureNextFrame) {
-                    captureNextFrame = false
-                    ingestor.ingestSensorReading("camera_stream", ts, bytes)
-                } else {
-                    // Optionally we could sample; for now do not send continuous frames
-                }
-            } catch (e: Exception) {
-                // ignore
-            } finally {
-                imageProxy.close()
-            }
+        Log.d(TAG, "start() called with previewView=$previewView, periodicSeconds=$periodicSeconds")
+        currentPreviewView = previewView
+        
+        // Ensure camera initialization happens on main thread for PreviewView
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            initializeCamera()
+        } else {
+            mainHandler.post { initializeCamera() }
         }
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                provider.unbindAll()
-                camera = provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageCapture, imageAnalysis)
-            } catch (e: Exception) {
-                // ignore startup errors for the sample app
+    }
+    
+    private fun initializeCamera() {
+        Log.d(TAG, "initializeCamera() starting on thread: ${Thread.currentThread().name}")
+        try {
+            val provider = ProcessCameraProvider.getInstance(context).get()
+            cameraProvider = provider
+            Log.d(TAG, "ProcessCameraProvider obtained")
+
+            // Build preview use case
+            val preview = Preview.Builder().build()
+            
+            // Connect preview to PreviewView on main thread
+            currentPreviewView?.let { pv ->
+                Log.d(TAG, "Setting surface provider for PreviewView")
+                preview.setSurfaceProvider(pv.surfaceProvider)
             }
+
+            // Build image capture use case with current flash mode
+            imageCapture = ImageCapture.Builder()
+                .setTargetResolution(Size(1280, 720))
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setFlashMode(getImageCaptureFlashMode())
+                .build()
+            Log.d(TAG, "ImageCapture configured with flash mode: ${getImageCaptureFlashMode()}")
+
+            // Build image analysis use case
+            imageAnalysis = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+
+            imageAnalysis?.setAnalyzer(cameraThread) { imageProxy ->
+                try {
+                    val buffer = imageProxy.planes[0].buffer
+                    val bytes = ByteArray(buffer.remaining())
+                    buffer.get(bytes)
+                    val ts = System.currentTimeMillis()
+                    // Send frames when requested
+                    if (captureNextFrame) {
+                        captureNextFrame = false
+                        ingestor.ingestSensorReading("camera_stream", ts, bytes)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in image analyzer", e)
+                } finally {
+                    imageProxy.close()
+                }
+            }
+
+            // Select camera lens
+            val cameraSelector = CameraSelector.Builder()
+                .requireLensFacing(currentLensFacing)
+                .build()
+            
+            Log.d(TAG, "Camera selector configured for lens facing: $currentLensFacing")
+
+            // Unbind all previous use cases and bind new ones
+            provider.unbindAll()
+            camera = provider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                imageCapture,
+                imageAnalysis
+            )
+            
+            Log.d(TAG, "Camera bound to lifecycle successfully")
+            
+            // Enable torch if flash is ON (not AUTO)
+            if (flashMode == FlashMode.ON && camera?.cameraInfo?.hasFlashUnit() == true) {
+                camera?.cameraControl?.enableTorch(true)
+                Log.d(TAG, "Torch enabled")
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing camera", e)
+        }
+    }
+    
+    private fun getImageCaptureFlashMode(): Int {
+        return when (flashMode) {
+            FlashMode.OFF -> ImageCapture.FLASH_MODE_OFF
+            FlashMode.ON -> ImageCapture.FLASH_MODE_ON
+            FlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
         }
     }
 
     fun stop() {
+        Log.d(TAG, "stop() called")
         try {
+            camera?.cameraControl?.enableTorch(false)
             cameraProvider?.unbindAll()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping camera", e)
+        }
+        currentPreviewView = null
     }
 
     /** Request the next analyzer frame to be forwarded to the ingestor. */
     fun captureOnce() {
         captureNextFrame = true
     }
+    
+    /** Switch between front and back camera */
+    fun switchCamera() {
+        Log.d(TAG, "switchCamera() called, current lens: $currentLensFacing")
+        currentLensFacing = if (currentLensFacing == CameraSelector.LENS_FACING_BACK) {
+            CameraSelector.LENS_FACING_FRONT
+        } else {
+            CameraSelector.LENS_FACING_BACK
+        }
+        Log.d(TAG, "Switching to lens: $currentLensFacing")
+        
+        // Restart with current preview view
+        currentPreviewView?.let { pv ->
+            stop()
+            start(pv)
+        }
+    }
+    
+    /** Cycle through flash modes: OFF -> ON -> AUTO -> OFF */
+    fun cycleFlash() {
+        flashMode = when (flashMode) {
+            FlashMode.OFF -> FlashMode.ON
+            FlashMode.ON -> FlashMode.AUTO
+            FlashMode.AUTO -> FlashMode.OFF
+        }
+        Log.d(TAG, "Flash mode changed to: $flashMode")
+        
+        // Update flash mode on current camera
+        imageCapture?.flashMode = getImageCaptureFlashMode()
+        
+        // Update torch for ON mode (turn off for others)
+        camera?.let {
+            if (it.cameraInfo.hasFlashUnit()) {
+                it.cameraControl.enableTorch(flashMode == FlashMode.ON)
+            }
+        }
+    }
+    
+    /** Get current flash mode */
+    fun getFlashMode(): FlashMode = flashMode
+    
+    /** Check if currently using front camera */
+    fun isFrontCamera(): Boolean = currentLensFacing == CameraSelector.LENS_FACING_FRONT
 }

@@ -1,17 +1,26 @@
 package com.ustadmobile.meshrabiya.sensor.capture
 
+import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor
+import kotlin.math.abs
+import kotlin.math.log10
 
 class AudioCapture(private val ingestor: StreamIngestor) {
     private var recorder: AudioRecord? = null
     private var running = false
+    
+    private val _audioLevel = MutableStateFlow(0f) // 0-100 scale
+    val audioLevel: StateFlow<Float> = _audioLevel
 
+    @SuppressLint("MissingPermission")
     fun start() {
         if (running) return
         val sampleRate = 16000
@@ -27,6 +36,20 @@ class AudioCapture(private val ingestor: StreamIngestor) {
                 while (running && recorder != null) {
                     val read = recorder!!.read(buf, 0, buf.size)
                     if (read > 0) {
+                        // Calculate audio amplitude for visualization
+                        var sum = 0.0
+                        for (i in 0 until read) {
+                            sum += abs(buf[i].toDouble())
+                        }
+                        val amplitude = sum / read
+                        // Convert to dB scale (0-100)
+                        val db = if (amplitude > 1) {
+                            20 * log10(amplitude / 32768.0) + 90 // Normalize to 0-90 range
+                        } else {
+                            0.0
+                        }
+                        _audioLevel.value = db.toFloat().coerceIn(0f, 100f)
+                        
                         // convert to byte array (PCM 16 LE)
                         val bytes = ShortArrayToByteArray(buf, read)
                         val ts = System.currentTimeMillis()
@@ -41,6 +64,7 @@ class AudioCapture(private val ingestor: StreamIngestor) {
 
     fun stop() {
         running = false
+        _audioLevel.value = 0f
         try {
             recorder?.stop()
             recorder?.release()
