@@ -5,40 +5,61 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import com.google.accompanist.flowlayout.FlowRow
 import androidx.compose.material.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import com.ustadmobile.meshrabiya.sensor.capture.AudioCapture
+import com.ustadmobile.meshrabiya.sensor.capture.CameraCapture
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import com.ustadmobile.meshrabiya.sensor.stream.HttpStreamIngestor
-import com.ustadmobile.meshrabiya.sensor.stream.IngestEvent
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import com.ustadmobile.meshrabiya.sensor.capture.CameraCapture
-import com.ustadmobile.meshrabiya.sensor.capture.AudioCapture
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.camera.view.PreviewView
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+// UI-facing ingestor type: exposes the same events flow as the app's in-process ingestor
+private interface UIIngestor : com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor {
+    data class UIEvent(val streamId: String, val timestampMs: Long, val payloadLength: Int)
+    val events: SharedFlow<UIEvent>
+}
+
 @Composable
-fun SensorApp(ingestorOverride: com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor? = null) {
+fun SensorApp() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val scope = rememberCoroutineScope()
     val sensorManager = remember { context.getSystemService(Context.SENSOR_SERVICE) as SensorManager }
 
     // Discover available hardware sensors
@@ -56,38 +77,57 @@ fun SensorApp(ingestorOverride: com.ustadmobile.meshrabiya.sensor.stream.StreamI
         android.util.Log.d("SensorApp", "Total sensors found: ${hardwareSensors.size}")
     }
 
-    // UI state
+    // State management
     val sensorCategories = remember { defaultSensorCategories() }
     var pollingFrequency by remember { mutableStateOf(10) }
-    var selectedSensors by remember { mutableStateOf(setOf<String>()) }
+    var selectedSensors by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var expandedCategories by remember { mutableStateOf<Set<String>>(emptySet()) }
     var ingestorRunning by remember { mutableStateOf(false) }
+    var statusMessage by remember { mutableStateOf("Ready to start") }
     val ingestLog = remember { mutableStateListOf<String>() }
-    var expandedCategories by remember { mutableStateOf(setOf<String>()) }
+    val listeners = remember { mutableMapOf<String, SensorEventListener>() }
+    
+    // Camera & Audio control state
+    var videoFrameRate by remember { mutableStateOf(30) }
+    var videoFormat by remember { mutableStateOf("H.264") }
+    var photoAspectRatio by remember { mutableStateOf("16:9") }
+    var photoPixelDepth by remember { mutableStateOf("8-bit") }
+    var photoFrequency by remember { mutableStateOf(5) } // seconds
 
-    // Ingestor wiring — allow tests to override; production defaults to HTTP-backed ingestor
-    val ingestor = ingestorOverride ?: remember {
-        // Endpoint is intentionally placeholder; tests should inject or mock network layer.
+    // Initialize HttpStreamIngestor with UI event tracking
+    val ingestor = remember {
         val http = HttpStreamIngestor("https://example.com/store", token = null)
-
-        // Wrap to expose events for the UI (same shape as LocalStreamIngestor.events)
-        val _events = MutableSharedFlow<IngestEvent>(replay = 0)
-
-        object : com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor {
-            override fun start() { http.start() }
-            override fun stop() { http.stop() }
+        val _events = MutableSharedFlow<UIIngestor.UIEvent>(replay = 0, extraBufferCapacity = 100)
+        object : UIIngestor {
+            override val events: SharedFlow<UIIngestor.UIEvent> = _events
+            override fun start() = http.start()
+            override fun stop() = http.stop()
             override fun ingestSensorReading(streamId: String, timestampMs: Long, payload: ByteArray) {
                 http.ingestSensorReading(streamId, timestampMs, payload)
-                try { _events.tryEmit(IngestEvent(streamId, timestampMs, payload.size)) } catch (_: Throwable) {}
+                try {
+                    _events.tryEmit(UIIngestor.UIEvent(streamId, timestampMs, payload.size))
+                } catch (_: Throwable) {}
             }
-
-            // Expose events so the UI can subscribe (extension-like)
-            val events = _events.asSharedFlow()
         }
     }
-    val listeners = remember { mutableMapOf<String, SensorEventListener>() }
+
+    // Job for events collection so we can cancel it on stop
+    var eventsJob by remember { mutableStateOf<Job?>(null) }
+
+    // Cleanup on dispose
+    DisposableEffect(Unit) {
+        onDispose {
+            listeners.values.forEach { sensorManager.unregisterListener(it) }
+            listeners.clear()
+            eventsJob?.cancel()
+            if (ingestorRunning) {
+                ingestor.stop()
+            }
+        }
+    }
 
     // When selection changes: register/unregister hardware sensor listeners
-    LaunchedEffect(selectedSensors, hardwareSensors.keys) {
+    LaunchedEffect(selectedSensors, hardwareSensors.keys.toList()) {
         val hwIds = hardwareSensors.keys
         val toRegister = selectedSensors.filter { it in hwIds } - listeners.keys
         val toUnregister = listeners.keys - selectedSensors
@@ -116,18 +156,13 @@ fun SensorApp(ingestorOverride: com.ustadmobile.meshrabiya.sensor.stream.StreamI
         }
     }
 
-    // Camera and audio capture controllers (for virtual sensors)
-    val lifecycleOwner = LocalLifecycleOwner.current
+    // Camera and audio capture controllers
     val cameraController = remember { CameraCapture(context, lifecycleOwner, ingestor) }
     val audioController = remember { AudioCapture(ingestor) }
+    val audioLevel by audioController.audioLevel.collectAsState()
 
+    // Start/stop audio based on selection (camera is managed by AndroidView)
     LaunchedEffect(selectedSensors) {
-        if (selectedSensors.contains("camera_stream")) {
-            cameraController.start(periodicSeconds = 5)
-        } else {
-            cameraController.stop()
-        }
-
         if (selectedSensors.contains("audio_stream")) {
             audioController.start()
         } else {
@@ -135,144 +170,924 @@ fun SensorApp(ingestorOverride: com.ustadmobile.meshrabiya.sensor.stream.StreamI
         }
     }
 
-    // UI layout
-    val scope = rememberCoroutineScope()
-
-    // Root column includes the app background color (purple) to match expected UI theme.
-    // A `testTag` is added so instrumentation tests can verify the presence of the purple background
-    // without changing layout or visible elements.
-    Column(modifier = Modifier.fillMaxSize().background(Color(0xFF6A1B9A)).padding(8.dp).testTag("app_root_background")) {
-        TopAppBar(title = { Text("Abhaya Sensor") }, actions = {})
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Controls: polling freq
-        Card(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                Text("Polling Frequency: $pollingFrequency Hz")
-                Spacer(modifier = Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(1,5,10,25,50,100).forEach { v ->
-                        Button(onClick = { pollingFrequency = v }) { Text("${v}Hz") }
+    // Start/stop functions
+    val startIngestor = {
+        if (!ingestorRunning) {
+            ingestor.start()
+            ingestorRunning = true
+            statusMessage = "Streaming active"
+            eventsJob = scope.launch {
+                try {
+                    (ingestor as? UIIngestor)?.events?.collectLatest { ev ->
+                        ingestLog.add(0, "${ev.streamId} @ ${ev.timestampMs} (${ev.payloadLength} bytes)")
+                        if (ingestLog.size > 200) ingestLog.removeLast()
                     }
-                }
+                } catch (_: Throwable) {}
             }
         }
+    }
 
-        Spacer(modifier = Modifier.height(8.dp))
+    val stopIngestor = {
+        if (ingestorRunning) {
+            eventsJob?.cancel()
+            eventsJob = null
+            ingestor.stop()
+            ingestorRunning = false
+            statusMessage = "Stopped"
+        }
+    }
 
-        // Left: categories and sensors; Right: status/logs
-        Row(modifier = Modifier.weight(1f)) {
-            LazyColumn(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                items(sensorCategories) { cat ->
-                    Card(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
-                        Column(modifier = Modifier.padding(8.dp)) {
-                            Text(cat.name, style = MaterialTheme.typography.h6)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            cat.sensors.forEach { s ->
-                                val id = s.id
-                                val available = when (id) {
-                                    "camera_stream", "audio_stream", "periodic_photos" -> true
-                                    else -> hardwareSensors.containsKey(id)
-                                }
-                                if (!available) return@forEach
+    // Gradient background colors (slate-900 to purple-900 to slate-900)
+    val backgroundGradient = Brush.verticalGradient(
+        colors = listOf(
+            Color(0xFF1E293B), // slate-900
+            Color(0xFF581C87), // purple-900
+            Color(0xFF1E293B)  // slate-900
+        )
+    )
 
-                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    val checked = selectedSensors.contains(id)
-                                    Checkbox(checked = checked, onCheckedChange = { ch ->
-                                        selectedSensors = if (ch) selectedSensors + id else selectedSensors - id
-                                    })
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(s.name)
-                                        Text(s.desc, color = Color.Gray)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundGradient)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            // App Header
+            AppHeader(
+                isRunning = ingestorRunning,
+                statusMessage = statusMessage
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Polling Frequency Section
+            PollingFrequencySection(
+                currentFrequency = pollingFrequency,
+                onFrequencyChange = { pollingFrequency = it }
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Sensors Selection with Categories
+            GlassmorphicCard(title = "Select Sensors") {
+                Column {
+                    sensorCategories.forEach { cat ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .clickable {
+                                    expandedCategories = if (expandedCategories.contains(cat.name)) {
+                                        expandedCategories - cat.name
+                                    } else {
+                                        expandedCategories + cat.name
                                     }
-                                    // Per-virtual-sensor quick actions
-                                    if (id == "camera_stream") {
-                                        Button(onClick = { if (checked) cameraController.captureOnce() else {} }, enabled = checked) { Text("Capture") }
-                                    }
-                                    Text(if (checked) "On" else "Off")
+                                },
+                            shape = RoundedCornerShape(8.dp),
+                            backgroundColor = Color.White.copy(alpha = 0.05f),
+                            elevation = 0.dp
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = cat.name,
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color.White
+                                    )
+                                    val isExpanded = expandedCategories.contains(cat.name)
+                                    Text(
+                                        text = if (isExpanded) "▼" else "▶",
+                                        fontSize = 14.sp,
+                                        color = Color.White.copy(alpha = 0.6f)
+                                    )
                                 }
-                            }
-                        }
-                    }
-                }
-            }
 
-                // Right column: status, camera preview and log
-            Column(modifier = Modifier.weight(1f)) {
-                Card(modifier = Modifier.fillMaxWidth().padding(4.dp)) {
-                    Column(modifier = Modifier.padding(8.dp)) {
-                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                            Text("Ingestor", fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                            Text(if (ingestorRunning) "Running" else "Stopped", color = if (ingestorRunning) Color(0xFF2E7D32) else Color.Gray)
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row {
-                            Button(onClick = {
-                                if (!ingestorRunning) {
-                                    ingestor.start(); ingestorRunning = true
-                                    // subscribe to events
-                                    scope.launch {
-                                        // If the ingestor wrapper exposes an events flow, subscribe to it for UI
-                                        (ingestor as? Any)?.let { ig ->
-                                            try {
-                                                val eventsField = ig::class.members.firstOrNull { it.name == "events" }
-                                                // best-effort: if events is present, collect it
-                                                // Note: reflection access is minimal and only for UI logging in this wrapper
-                                            } catch (_: Throwable) {}
+                                // Show sensors only if category is expanded
+                                if (expandedCategories.contains(cat.name)) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    cat.sensors.forEach { s ->
+                                        val id = s.id
+                                        val available = when (id) {
+                                            "camera_stream", "audio_stream", "periodic_photos" -> true
+                                            else -> hardwareSensors.containsKey(id)
+                                        }
+
+                                        Column(modifier = Modifier.fillMaxWidth()) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 4.dp)
+                                                    .then(
+                                                        if (!available) Modifier.background(
+                                                            Color.Black.copy(alpha = 0.2f),
+                                                            RoundedCornerShape(4.dp)
+                                                        ) else Modifier
+                                                    ),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                val checked = selectedSensors.contains(id)
+                                                Checkbox(
+                                                    checked = checked,
+                                                    enabled = available,
+                                                    onCheckedChange = { ch ->
+                                                        selectedSensors = if (ch) {
+                                                            selectedSensors + id
+                                                        } else {
+                                                            selectedSensors - id
+                                                        }
+                                                    },
+                                                    colors = CheckboxDefaults.colors(
+                                                        checkedColor = Color(0xFF8B5CF6),
+                                                        uncheckedColor = Color.White.copy(alpha = 0.4f),
+                                                        disabledColor = Color.Gray.copy(alpha = 0.3f)
+                                                    )
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = s.name,
+                                                        fontSize = 14.sp,
+                                                        color = if (available) Color.White else Color.Gray.copy(alpha = 0.5f)
+                                                    )
+                                                    Text(
+                                                        text = if (available) s.desc else "Not available on this device",
+                                                        fontSize = 12.sp,
+                                                        color = if (available) 
+                                                            Color.White.copy(alpha = 0.6f)
+                                                        else 
+                                                            Color.Gray.copy(alpha = 0.4f),
+                                                        fontStyle = if (!available) androidx.compose.ui.text.font.FontStyle.Italic else null
+                                                    )
+                                                }
+                                                Text(
+                                                    text = if (!available) "N/A" else if (checked) "ON" else "OFF",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = when {
+                                                        !available -> Color(0xFF9CA3AF)
+                                                        checked -> Color(0xFF10B981)
+                                                        else -> Color(0xFF6B7280)
+                                                    }
+                                                )
+                                            }
+                                            
+                                            // Show camera preview when camera_stream (Video) is selected
+                                            if (id == "camera_stream" && selectedSensors.contains(id)) {
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Column(modifier = Modifier.padding(start = 40.dp)) {
+                                                    // Camera Preview
+                                                    Card(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .height(200.dp),
+                                                        shape = RoundedCornerShape(12.dp),
+                                                        backgroundColor = Color.Black,
+                                                        elevation = 0.dp
+                                                    ) {
+                                                        val previewView = remember { PreviewView(context) }
+                                                        
+                                                        // Start camera when this preview is shown
+                                                        LaunchedEffect(previewView) {
+                                                            cameraController.start(previewView, periodicSeconds = 5)
+                                                        }
+                                                        
+                                                        // Stop camera when this preview is removed
+                                                        DisposableEffect(Unit) {
+                                                            onDispose {
+                                                                if (!selectedSensors.contains("periodic_photos")) {
+                                                                    cameraController.stop()
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        AndroidView(
+                                                            factory = { previewView },
+                                                            modifier = Modifier.fillMaxSize()
+                                                        )
+                                                    }
+                                                    
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    
+                                                    // Camera Controls: Camera/Flash toggles
+                                                    FlowRow(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        mainAxisSpacing = 8.dp,
+                                                        crossAxisSpacing = 8.dp
+                                                    ) {
+                                                        Button(
+                                                            onClick = { cameraController.switchCamera() },
+                                                            modifier = Modifier.height(36.dp),
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                backgroundColor = Color.White.copy(alpha = 0.15f)
+                                                            ),
+                                                            shape = RoundedCornerShape(8.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Refresh,
+                                                                contentDescription = "Switch Camera",
+                                                                tint = Color.White,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(
+                                                                text = if (cameraController.isFrontCamera()) "Front" else "Back",
+                                                                color = Color.White,
+                                                                fontSize = 12.sp
+                                                            )
+                                                        }
+                                                        
+                                                        var flashModeState by remember { mutableStateOf(cameraController.getFlashMode()) }
+                                                        
+                                                        Button(
+                                                            onClick = { 
+                                                                cameraController.cycleFlash()
+                                                                flashModeState = cameraController.getFlashMode()
+                                                            },
+                                                            modifier = Modifier.height(36.dp),
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                backgroundColor = when (flashModeState) {
+                                                                    CameraCapture.FlashMode.OFF -> Color.White.copy(alpha = 0.15f)
+                                                                    CameraCapture.FlashMode.ON -> Color(0xFFFBBF24)
+                                                                    CameraCapture.FlashMode.AUTO -> Color(0xFF3B82F6)
+                                                                }
+                                                            ),
+                                                            shape = RoundedCornerShape(8.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Lightbulb,
+                                                                contentDescription = "Cycle Flash Mode",
+                                                                tint = when (flashModeState) {
+                                                                    CameraCapture.FlashMode.OFF -> Color.White
+                                                                    CameraCapture.FlashMode.ON -> Color.Black
+                                                                    CameraCapture.FlashMode.AUTO -> Color.White
+                                                                },
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(
+                                                                text = when (flashModeState) {
+                                                                    CameraCapture.FlashMode.OFF -> "Flash: Off"
+                                                                    CameraCapture.FlashMode.ON -> "Flash: On"
+                                                                    CameraCapture.FlashMode.AUTO -> "Flash: Auto"
+                                                                },
+                                                                color = when (flashModeState) {
+                                                                    CameraCapture.FlashMode.OFF -> Color.White
+                                                                    CameraCapture.FlashMode.ON -> Color.Black
+                                                                    CameraCapture.FlashMode.AUTO -> Color.White
+                                                                },
+                                                                fontSize = 12.sp
+                                                            )
+                                                        }
+                                                    }
+                                                    
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    
+                                                    // Camera Controls: Frame Rate
+                                                    FlowRow(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        mainAxisSpacing = 6.dp,
+                                                        crossAxisSpacing = 6.dp
+                                                    ) {
+                                                        Text(
+                                                            text = "FPS:",
+                                                            color = Color.White.copy(alpha = 0.7f),
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(end = 4.dp)
+                                                        )
+                                                        listOf(15, 24, 30, 60).forEach { fps ->
+                                                            Button(
+                                                                onClick = { videoFrameRate = fps },
+                                                                modifier = Modifier.height(32.dp),
+                                                                colors = ButtonDefaults.buttonColors(
+                                                                    backgroundColor = if (videoFrameRate == fps) 
+                                                                        Color(0xFF8B5CF6) else Color.White.copy(alpha = 0.1f)
+                                                                ),
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                contentPadding = PaddingValues(horizontal = 12.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = "$fps",
+                                                                    color = Color.White,
+                                                                    fontSize = 11.sp
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    
+                                                    // Camera Controls: Format
+                                                    FlowRow(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        mainAxisSpacing = 6.dp,
+                                                        crossAxisSpacing = 6.dp
+                                                    ) {
+                                                        Text(
+                                                            text = "Format:",
+                                                            color = Color.White.copy(alpha = 0.7f),
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(end = 4.dp)
+                                                        )
+                                                        listOf("H.264", "H.265", "VP9").forEach { fmt ->
+                                                            Button(
+                                                                onClick = { videoFormat = fmt },
+                                                                modifier = Modifier.height(32.dp),
+                                                                colors = ButtonDefaults.buttonColors(
+                                                                    backgroundColor = if (videoFormat == fmt) 
+                                                                        Color(0xFF8B5CF6) else Color.White.copy(alpha = 0.1f)
+                                                                ),
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                contentPadding = PaddingValues(horizontal = 12.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = fmt,
+                                                                    color = Color.White,
+                                                                    fontSize = 11.sp
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                            }
+                                            
+                                            // Show camera preview when periodic_photos is selected
+                                            if (id == "periodic_photos" && selectedSensors.contains(id)) {
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Column(modifier = Modifier.padding(start = 40.dp)) {
+                                                    // Camera Preview
+                                                    Card(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .height(200.dp),
+                                                        shape = RoundedCornerShape(12.dp),
+                                                        backgroundColor = Color.Black,
+                                                        elevation = 0.dp
+                                                    ) {
+                                                        val previewView = remember { PreviewView(context) }
+                                                        
+                                                        // Start camera when this preview is shown
+                                                        LaunchedEffect(previewView, photoFrequency) {
+                                                            cameraController.start(previewView, photoFrequency)
+                                                        }
+                                                        
+                                                        // Stop camera when this preview is removed
+                                                        DisposableEffect(Unit) {
+                                                            onDispose {
+                                                                if (!selectedSensors.contains("camera_stream")) {
+                                                                    cameraController.stop()
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        AndroidView(
+                                                            factory = { previewView },
+                                                            modifier = Modifier.fillMaxSize()
+                                                        )
+                                                    }
+                                                    
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    
+                                                    // Camera Controls Row 1: Camera/Flash toggles
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                    ) {
+                                                        Button(
+                                                            onClick = { cameraController.switchCamera() },
+                                                            modifier = Modifier.weight(1f).height(36.dp),
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                backgroundColor = Color.White.copy(alpha = 0.15f)
+                                                            ),
+                                                            shape = RoundedCornerShape(8.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Refresh,
+                                                                contentDescription = "Switch Camera",
+                                                                tint = Color.White,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(
+                                                                text = if (cameraController.isFrontCamera()) "Front" else "Back",
+                                                                color = Color.White,
+                                                                fontSize = 12.sp
+                                                            )
+                                                        }
+                                                        
+                                                        var flashModeState2 by remember { mutableStateOf(cameraController.getFlashMode()) }
+                                                        
+                                                        Button(
+                                                            onClick = { 
+                                                                cameraController.cycleFlash()
+                                                                flashModeState2 = cameraController.getFlashMode()
+                                                            },
+                                                            modifier = Modifier.weight(1f).height(36.dp),
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                backgroundColor = when (flashModeState2) {
+                                                                    CameraCapture.FlashMode.OFF -> Color.White.copy(alpha = 0.15f)
+                                                                    CameraCapture.FlashMode.ON -> Color(0xFFFBBF24)
+                                                                    CameraCapture.FlashMode.AUTO -> Color(0xFF3B82F6)
+                                                                }
+                                                            ),
+                                                            shape = RoundedCornerShape(8.dp)
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.Lightbulb,
+                                                                contentDescription = "Cycle Flash Mode",
+                                                                tint = when (flashModeState2) {
+                                                                    CameraCapture.FlashMode.OFF -> Color.White
+                                                                    CameraCapture.FlashMode.ON -> Color.Black
+                                                                    CameraCapture.FlashMode.AUTO -> Color.White
+                                                                },
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(4.dp))
+                                                            Text(
+                                                                text = when (flashModeState2) {
+                                                                    CameraCapture.FlashMode.OFF -> "Flash: Off"
+                                                                    CameraCapture.FlashMode.ON -> "Flash: On"
+                                                                    CameraCapture.FlashMode.AUTO -> "Flash: Auto"
+                                                                },
+                                                                color = when (flashModeState2) {
+                                                                    CameraCapture.FlashMode.OFF -> Color.White
+                                                                    CameraCapture.FlashMode.ON -> Color.Black
+                                                                    CameraCapture.FlashMode.AUTO -> Color.White
+                                                                },
+                                                                fontSize = 12.sp
+                                                            )
+                                                        }
+                                                    }
+                                                    
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    
+                                                    // Photo Controls: Aspect Ratio & Pixel Depth
+                                                    FlowRow(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        mainAxisSpacing = 6.dp,
+                                                        crossAxisSpacing = 6.dp
+                                                    ) {
+                                                        Text(
+                                                            text = "Ratio:",
+                                                            color = Color.White.copy(alpha = 0.7f),
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(end = 4.dp)
+                                                        )
+                                                        listOf("4:3", "16:9", "1:1").forEach { ratio ->
+                                                            Button(
+                                                                onClick = { photoAspectRatio = ratio },
+                                                                modifier = Modifier.height(32.dp),
+                                                                colors = ButtonDefaults.buttonColors(
+                                                                    backgroundColor = if (photoAspectRatio == ratio) 
+                                                                        Color(0xFF8B5CF6) else Color.White.copy(alpha = 0.1f)
+                                                                ),
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                contentPadding = PaddingValues(horizontal = 10.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = ratio,
+                                                                    color = Color.White,
+                                                                    fontSize = 11.sp
+                                                                )
+                                                            }
+                                                        }
+                                                        
+                                                        Text(
+                                                            text = "Depth:",
+                                                            color = Color.White.copy(alpha = 0.7f),
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(start = 8.dp, end = 4.dp)
+                                                        )
+                                                        listOf("8-bit", "10-bit").forEach { depth ->
+                                                            Button(
+                                                                onClick = { photoPixelDepth = depth },
+                                                                modifier = Modifier.height(32.dp),
+                                                                colors = ButtonDefaults.buttonColors(
+                                                                    backgroundColor = if (photoPixelDepth == depth) 
+                                                                        Color(0xFF8B5CF6) else Color.White.copy(alpha = 0.1f)
+                                                                ),
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                contentPadding = PaddingValues(horizontal = 10.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = depth,
+                                                                    color = Color.White,
+                                                                    fontSize = 11.sp
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    Spacer(modifier = Modifier.height(8.dp))
+                                                    
+                                                    // Photo Controls: Capture Frequency
+                                                    FlowRow(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        mainAxisSpacing = 6.dp,
+                                                        crossAxisSpacing = 6.dp
+                                                    ) {
+                                                        Text(
+                                                            text = "Interval:",
+                                                            color = Color.White.copy(alpha = 0.7f),
+                                                            fontSize = 11.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            modifier = Modifier.padding(end = 4.dp)
+                                                        )
+                                                        listOf(1, 3, 5, 10, 30, 60).forEach { sec ->
+                                                            Button(
+                                                                onClick = { photoFrequency = sec },
+                                                                modifier = Modifier.height(32.dp),
+                                                                colors = ButtonDefaults.buttonColors(
+                                                                    backgroundColor = if (photoFrequency == sec) 
+                                                                        Color(0xFF8B5CF6) else Color.White.copy(alpha = 0.1f)
+                                                                ),
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                contentPadding = PaddingValues(horizontal = 10.dp)
+                                                            ) {
+                                                                Text(
+                                                                    text = "${sec}s",
+                                                                    color = Color.White,
+                                                                    fontSize = 11.sp
+                                                                )
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                            }
+                                            
+                                            // Show audio visualization when audio_stream is selected
+                                            if (id == "audio_stream" && selectedSensors.contains(id)) {
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Column(modifier = Modifier.padding(start = 40.dp)) {
+                                                    Card(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        shape = RoundedCornerShape(12.dp),
+                                                        backgroundColor = Color.Black.copy(alpha = 0.3f),
+                                                        elevation = 0.dp
+                                                    ) {
+                                                        Column(
+                                                            modifier = Modifier.padding(16.dp),
+                                                            horizontalAlignment = Alignment.CenterHorizontally
+                                                        ) {
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                            ) {
+                                                                Icon(
+                                                                    imageVector = Icons.Default.Phone,
+                                                                    contentDescription = "Microphone",
+                                                                    tint = Color(0xFF10B981),
+                                                                    modifier = Modifier.size(20.dp)
+                                                                )
+                                                                Text(
+                                                                    text = "Audio Recording Active",
+                                                                    color = Color(0xFF10B981),
+                                                                    fontSize = 14.sp,
+                                                                    fontWeight = FontWeight.Bold
+                                                                )
+                                                            }
+                                                            
+                                                            Spacer(modifier = Modifier.height(16.dp))
+                                                            
+                                                            // Audio Level Meter
+                                                            Column(
+                                                                modifier = Modifier.fillMaxWidth(),
+                                                                horizontalAlignment = Alignment.CenterHorizontally
+                                                            ) {
+                                                                Text(
+                                                                    text = "Level: ${audioLevel.toInt()}%",
+                                                                    color = Color.White.copy(alpha = 0.9f),
+                                                                    fontSize = 13.sp,
+                                                                    fontWeight = FontWeight.Medium
+                                                                )
+                                                                
+                                                                Spacer(modifier = Modifier.height(8.dp))
+                                                                
+                                                                // Horizontal level bar
+                                                                Box(
+                                                                    modifier = Modifier
+                                                                        .fillMaxWidth()
+                                                                        .height(24.dp)
+                                                                        .clip(RoundedCornerShape(12.dp))
+                                                                        .background(Color.White.copy(alpha = 0.1f))
+                                                                ) {
+                                                                    Box(
+                                                                        modifier = Modifier
+                                                                            .fillMaxHeight()
+                                                                            .fillMaxWidth(audioLevel / 100f)
+                                                                            .clip(RoundedCornerShape(12.dp))
+                                                                            .background(
+                                                                                when {
+                                                                                    audioLevel > 75 -> Color(0xFFEF4444) // red
+                                                                                    audioLevel > 50 -> Color(0xFFFBBF24) // yellow
+                                                                                    else -> Color(0xFF10B981) // green
+                                                                                }
+                                                                            )
+                                                                    )
+                                                                }
+                                                                
+                                                                Spacer(modifier = Modifier.height(8.dp))
+                                                                
+                                                                // Visual bars
+                                                                Row(
+                                                                    modifier = Modifier.fillMaxWidth(),
+                                                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                                                ) {
+                                                                    repeat(20) { index ->
+                                                                        val barHeight = if (audioLevel > (index * 5)) {
+                                                                            (8 + (index * 2)).dp
+                                                                        } else {
+                                                                            4.dp
+                                                                        }
+                                                                        Box(
+                                                                            modifier = Modifier
+                                                                                .width(8.dp)
+                                                                                .height(barHeight)
+                                                                                .clip(RoundedCornerShape(2.dp))
+                                                                                .background(
+                                                                                    if (audioLevel > (index * 5)) {
+                                                                                        when {
+                                                                                            index > 15 -> Color(0xFFEF4444)
+                                                                                            index > 10 -> Color(0xFFFBBF24)
+                                                                                            else -> Color(0xFF10B981)
+                                                                                        }
+                                                                                    } else {
+                                                                                        Color.White.copy(alpha = 0.2f)
+                                                                                    }
+                                                                                )
+                                                                        )
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(8.dp))
+                                            }
                                         }
                                     }
                                 }
-                            }, enabled = !ingestorRunning) { Text("Start Ingest") }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Button(onClick = { if (ingestorRunning) { ingestor.stop(); ingestorRunning = false } }, enabled = ingestorRunning) { Text("Stop Ingest") }
-                        }
-                    }
-                }
-
-                // Camera preview (CameraX PreviewView hosted in Compose)
-                Card(modifier = Modifier.fillMaxWidth().padding(4.dp).height(200.dp)) {
-                    AndroidView(factory = { ctx ->
-                        val pv = androidx.camera.view.PreviewView(ctx)
-                        pv
-                    }, update = { pv ->
-                        // If camera_stream is selected and ingestor running, ensure the camera is started with the preview
-                        if (selectedSensors.contains("camera_stream")) {
-                            cameraController.start(pv)
-                        } else {
-                            cameraController.stop()
-                        }
-                    })
-                }
-
-                // Live ingest log
-                Card(modifier = Modifier.fillMaxWidth().padding(4.dp).weight(1f)) {
-                    Column(modifier = Modifier.padding(8.dp)) {
-                        Text("Event Log", fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-                            ingestLog.forEach { l ->
-                                Text(l, fontSize = 12.sp)
-                                Spacer(modifier = Modifier.height(4.dp))
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Footer controls
-        Row(modifier = Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Selected: ${selectedSensors.size}")
-            Row {
-                Button(onClick = { selectedSensors = emptySet() }) { Text("Clear") }
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(onClick = { if (!ingestorRunning) { ingestor.start(); ingestorRunning = true } }) { Text("Ensure Ingest Running") }
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Event Log
+            if (ingestLog.isNotEmpty()) {
+                GlassmorphicCard(title = "Event Log") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(150.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        ingestLog.forEach { logEntry ->
+                            Text(
+                                text = logEntry,
+                                fontSize = 11.sp,
+                                color = Color.White.copy(alpha = 0.8f),
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            // Control Buttons
+            ControlButtons(
+                isRunning = ingestorRunning,
+                onStartClick = startIngestor,
+                onStopClick = stopIngestor
+            )
+        }
+    }
+}
+
+@Composable
+private fun AppHeader(
+    isRunning: Boolean,
+    statusMessage: String
+) {
+    // Animated pulse for running indicator
+    val infiniteTransition = rememberInfiniteTransition()
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1000, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        )
+    )
+
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Abhaya Sensor",
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(12.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isRunning)
+                                Color(0xFF10B981).copy(alpha = pulseAlpha)
+                            else
+                                Color(0xFF6B7280)
+                        )
+                )
+                Text(
+                    text = if (isRunning) "ACTIVE" else "STOPPED",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (isRunning) Color(0xFF10B981) else Color(0xFF9CA3AF)
+                )
             }
         }
-    } // End Column
-} // End SensorApp
 
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = statusMessage,
+            fontSize = 14.sp,
+            color = Color.White.copy(alpha = 0.7f)
+        )
+    }
+}
+
+@Composable
+private fun GlassmorphicCard(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        backgroundColor = Color.White.copy(alpha = 0.1f),
+        elevation = 0.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(16.dp)
+        ) {
+            Text(
+                text = title,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun PollingFrequencySection(
+    currentFrequency: Int,
+    onFrequencyChange: (Int) -> Unit
+) {
+    GlassmorphicCard(title = "Polling Frequency") {
+        Column {
+            Text(
+                text = "Current: $currentFrequency Hz",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium,
+                color = Color.White
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Frequency options in a grid
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(1, 5, 10).forEach { freq ->
+                    FrequencyButton(
+                        frequency = freq,
+                        isSelected = currentFrequency == freq,
+                        onSelect = { onFrequencyChange(freq) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf(25, 50, 100).forEach { freq ->
+                    FrequencyButton(
+                        frequency = freq,
+                        isSelected = currentFrequency == freq,
+                        onSelect = { onFrequencyChange(freq) },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FrequencyButton(
+    frequency: Int,
+    isSelected: Boolean,
+    onSelect: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = onSelect,
+        modifier = modifier.height(48.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = ButtonDefaults.buttonColors(
+            backgroundColor = if (isSelected)
+                Color(0xFF8B5CF6)
+            else
+                Color.White.copy(alpha = 0.1f),
+            contentColor = Color.White
+        ),
+        elevation = ButtonDefaults.elevation(
+            defaultElevation = 0.dp,
+            pressedElevation = 0.dp
+        )
+    ) {
+        Text(
+            text = "${frequency}Hz",
+            fontSize = 14.sp,
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+@Composable
+private fun ControlButtons(
+    isRunning: Boolean,
+    onStartClick: () -> Unit,
+    onStopClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Button(
+            onClick = if (isRunning) onStopClick else onStartClick,
+            modifier = Modifier
+                .weight(1f)
+                .height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(
+                backgroundColor = if (isRunning)
+                    Color(0xFFEF4444) // red
+                else
+                    Color(0xFF10B981), // green
+                contentColor = Color.White
+            )
+        ) {
+            Text(
+                text = if (isRunning) "Stop Streaming" else "Start Streaming",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+// Helper data classes
 private data class SensorCategory(val name: String, val sensors: List<SensorDescriptor>)
 private data class SensorDescriptor(val id: String, val name: String, val desc: String)
 
