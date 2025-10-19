@@ -37,6 +37,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTag
 import com.ustadmobile.meshrabiya.sensor.capture.AudioCapture
 import com.ustadmobile.meshrabiya.sensor.capture.CameraCapture
 import kotlinx.coroutines.Job
@@ -234,7 +236,7 @@ fun SensorApp() {
             Spacer(modifier = Modifier.height(16.dp))
 
             // Sensors Selection with Categories
-            GlassmorphicCard(title = "Select Sensors") {
+            GlassmorphicCard(title = "Select Sensors", titleTestTag = "select_sensors_card") {
                 Column {
                     sensorCategories.forEach { cat ->
                         Card(
@@ -319,6 +321,15 @@ fun SensorApp() {
                                                         fontSize = 14.sp,
                                                         color = if (available) Color.White else Color.Gray.copy(alpha = 0.5f)
                                                     )
+                                                    if (id == "sensor_${Sensor.TYPE_AMBIENT_TEMPERATURE}") {
+                                                        // Provide a stable test tag for the temperature display so tests can assert deterministically
+                                                        Text(
+                                                            text = "Temperature: --",
+                                                            fontSize = 12.sp,
+                                                            color = Color.White.copy(alpha = 0.6f),
+                                                            modifier = Modifier.semantics { testTag = "sensor_temperature" }
+                                                        )
+                                                    }
                                                     Text(
                                                         text = if (available) s.desc else "Not available on this device",
                                                         fontSize = 12.sp,
@@ -852,7 +863,7 @@ fun SensorApp() {
 
             // Event Log
             if (ingestLog.isNotEmpty()) {
-                GlassmorphicCard(title = "Event Log") {
+                GlassmorphicCard(title = "Event Log", titleTestTag = "event_log") {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -931,7 +942,8 @@ private fun AppHeader(
                     text = if (isRunning) "ACTIVE" else "STOPPED",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (isRunning) Color(0xFF10B981) else Color(0xFF9CA3AF)
+                    color = if (isRunning) Color(0xFF10B981) else Color(0xFF9CA3AF),
+                    modifier = Modifier.semantics { testTag = "app_status" }
                 )
             }
         }
@@ -944,11 +956,13 @@ private fun AppHeader(
             color = Color.White.copy(alpha = 0.7f)
         )
     }
+
 }
 
 @Composable
 private fun GlassmorphicCard(
     title: String,
+    titleTestTag: String? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     Card(
@@ -959,6 +973,7 @@ private fun GlassmorphicCard(
     ) {
         Column(
             modifier = Modifier
+                .then(if (titleTestTag != null) Modifier.semantics { testTag = titleTestTag } else Modifier)
                 .padding(16.dp)
         ) {
             Text(
@@ -978,7 +993,7 @@ private fun PollingFrequencySection(
     currentFrequency: Int,
     onFrequencyChange: (Int) -> Unit
 ) {
-    GlassmorphicCard(title = "Polling Frequency") {
+    GlassmorphicCard(title = "Polling Frequency", titleTestTag = "polling_frequency") {
         Column {
             Text(
                 text = "Current: $currentFrequency Hz",
@@ -1068,7 +1083,8 @@ private fun ControlButtons(
             onClick = if (isRunning) onStopClick else onStartClick,
             modifier = Modifier
                 .weight(1f)
-                .height(56.dp),
+                .height(56.dp)
+                .semantics { testTag = "control_start_stop" },
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(
                 backgroundColor = if (isRunning)
@@ -1125,3 +1141,4 @@ private fun defaultSensorCategories(): List<SensorCategory> {
         ))
     )
 }
+
