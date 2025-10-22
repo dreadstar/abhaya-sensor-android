@@ -11,6 +11,8 @@ import androidx.camera.view.PreviewView
 import androidx.lifecycle.LifecycleOwner
 import com.ustadmobile.meshrabiya.sensor.stream.StreamIngestor
 import java.util.concurrent.Executors
+import androidx.camera.core.ImageCapture
+import com.ustadmobile.meshrabiya.sensor.util.UIIngestor
 
 /**
  * Camera capture that grabs ImageProxy frames and forwards byte buffers
@@ -19,7 +21,7 @@ import java.util.concurrent.Executors
 class CameraCapture(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner,
-    private val ingestor: StreamIngestor
+    private val ingestor: UIIngestor
 ) {
     companion object {
         private const val TAG = "CameraCapture"
@@ -35,13 +37,8 @@ class CameraCapture(
     private var currentLensFacing = CameraSelector.LENS_FACING_BACK
     
     // Flash mode enum with three states
-    enum class FlashMode {
-        OFF,    // No flash
-        ON,     // Always flash
-        AUTO    // Flash when needed
-    }
-    
-    private var flashMode = FlashMode.OFF
+    private var imageCaptureFlashMode: Int = ImageCapture.FLASH_MODE_OFF
+    private var torchEnabled: Boolean = false
     
     // When true the analyzer will forward the next available frame to the ingestor
     @Volatile
@@ -83,9 +80,9 @@ class CameraCapture(
             imageCapture = ImageCapture.Builder()
                 .setTargetResolution(Size(1280, 720))
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                .setFlashMode(getImageCaptureFlashMode())
+                .setFlashMode(imageCaptureFlashMode)
                 .build()
-            Log.d(TAG, "ImageCapture configured with flash mode: ${getImageCaptureFlashMode()}")
+            Log.d(TAG, "ImageCapture configured with flash mode: $imageCaptureFlashMode")
 
             // Build image analysis use case
             imageAnalysis = ImageAnalysis.Builder()
@@ -129,24 +126,13 @@ class CameraCapture(
             
             Log.d(TAG, "Camera bound to lifecycle successfully")
             
-            // Enable torch if flash is ON (not AUTO)
-            if (flashMode == FlashMode.ON && camera?.cameraInfo?.hasFlashUnit() == true) {
-                camera?.cameraControl?.enableTorch(true)
-                Log.d(TAG, "Torch enabled")
-            }
+           
             
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing camera", e)
         }
     }
     
-    private fun getImageCaptureFlashMode(): Int {
-        return when (flashMode) {
-            FlashMode.OFF -> ImageCapture.FLASH_MODE_OFF
-            FlashMode.ON -> ImageCapture.FLASH_MODE_ON
-            FlashMode.AUTO -> ImageCapture.FLASH_MODE_AUTO
-        }
-    }
 
     fun stop() {
         Log.d(TAG, "stop() called")
@@ -182,27 +168,27 @@ class CameraCapture(
     }
     
     /** Cycle through flash modes: OFF -> ON -> AUTO -> OFF */
-    fun cycleFlash() {
-        flashMode = when (flashMode) {
-            FlashMode.OFF -> FlashMode.ON
-            FlashMode.ON -> FlashMode.AUTO
-            FlashMode.AUTO -> FlashMode.OFF
+    fun cycleImageFlashMode() {
+        imageCaptureFlashMode = when (imageCaptureFlashMode) {
+            ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_ON
+            ImageCapture.FLASH_MODE_ON -> ImageCapture.FLASH_MODE_AUTO
+            ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_OFF
+            else -> ImageCapture.FLASH_MODE_OFF
         }
-        Log.d(TAG, "Flash mode changed to: $flashMode")
-        
-        // Update flash mode on current camera
-        imageCapture?.flashMode = getImageCaptureFlashMode()
-        
-        // Update torch for ON mode (turn off for others)
-        camera?.let {
-            if (it.cameraInfo.hasFlashUnit()) {
-                it.cameraControl.enableTorch(flashMode == FlashMode.ON)
-            }
-        }
+        imageCapture?.flashMode = imageCaptureFlashMode
+        Log.d(TAG, "ImageCapture flash mode changed to: $imageCaptureFlashMode")
+    }
+
+    fun toggleTorch() {
+        torchEnabled = !torchEnabled
+        camera?.cameraControl?.enableTorch(torchEnabled)
+        Log.d(TAG, "Torch enabled: $torchEnabled")
     }
     
-    /** Get current flash mode */
-    fun getFlashMode(): FlashMode = flashMode
+    fun getImageCaptureFlashMode(): Int = imageCaptureFlashMode
+    fun isTorchEnabled(): Boolean = torchEnabled
+
+
     
     /** Check if currently using front camera */
     fun isFrontCamera(): Boolean = currentLensFacing == CameraSelector.LENS_FACING_FRONT
