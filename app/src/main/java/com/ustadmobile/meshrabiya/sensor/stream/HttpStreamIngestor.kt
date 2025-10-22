@@ -21,6 +21,10 @@ class HttpStreamIngestor(private val endpoint: String, private val token: String
     @Volatile
     private var running = false
 
+    fun updateEndpoint(newEndpoint: String) {
+        endpoint = newEndpoint
+    }
+
     override fun start() {
         running = true
     }

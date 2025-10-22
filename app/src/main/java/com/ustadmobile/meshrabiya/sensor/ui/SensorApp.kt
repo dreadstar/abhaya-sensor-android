@@ -107,6 +107,7 @@ fun SensorApp() {
     var photoAspectRatio by remember { mutableStateOf("16:9") }
     var photoPixelDepth by remember { mutableStateOf("8-bit") }
     var photoFrequency by remember { mutableStateOf(5) } // seconds
+    var initialStepCount by remember { mutableStateOf<Float?>(null) }
 
     
 
@@ -125,6 +126,18 @@ fun SensorApp() {
                 } catch (_: Throwable) {}
             }
         }
+    }
+
+    // Add mesh node discovery logic (pseudo-code for clarity)
+    fun discoverStorageNodes(): List<MeshNodeInfo> {
+        // Use mesh APIs to broadcast a request and collect responses
+        // Each response includes node URL, latency, system state, etc.
+        // Return list of candidate nodes
+    }
+
+    fun selectBestNode(candidates: List<MeshNodeInfo>): MeshNodeInfo {
+        // Evaluate candidates based on latency, system state, etc.
+        // Return the best node
     }
 
     // Camera and audio capture controllers
@@ -164,9 +177,19 @@ fun SensorApp() {
                 override fun onSensorChanged(event: SensorEvent?) {
                     if (event == null) return
                     try {
-                        val payload = floatsToByteArray(event.values)
                         val ts = System.currentTimeMillis()
-                        ingestor.ingestSensorReading(id, ts, payload)
+                        if (id == "sensor_19") { // Sensor.TYPE_STEP_COUNTER == 19
+                            val stepValue = event.values[0]
+                            if (initialStepCount == null) {
+                                initialStepCount = stepValue
+                            }
+                            val stepsSinceStart = stepValue - (initialStepCount ?: stepValue)
+                            val payload = floatsToByteArray(floatArrayOf(stepsSinceStart))
+                            ingestor.ingestSensorReading(id, ts, payload)
+                        } else {
+                            val payload = floatsToByteArray(event.values)
+                            ingestor.ingestSensorReading(id, ts, payload)
+                        }
                     } catch (_: Exception) {}
                 }
 
@@ -191,6 +214,14 @@ fun SensorApp() {
     // Start/stop functions
     val startIngestor = {
         if (!ingestorRunning) {
+            initialStepCount = null
+            // 1. Discover storage nodes
+            val candidates = discoverStorageNodes()
+            // 2. Select best candidate
+            val selectedNode = selectBestNode(candidates)
+            // 3. Update HttpStreamIngestor endpoint
+            (ingestor as? HttpStreamIngestor)?.updateEndpoint(selectedNode.url)
+            // 4. Start streaming
             ingestor.start()
             ingestorRunning = true
             statusMessage = "Streaming active"
@@ -203,6 +234,16 @@ fun SensorApp() {
                 } catch (_: Throwable) {}
             }
         }
+    }
+
+    // Listen for stop signals from storage agent (pseudo-code)
+    fun listenForStopSignal(selectedNode: MeshNodeInfo) {
+        // Use mesh APIs to subscribe to stop signals from selectedNode
+        // On stop signal:
+        //   - discoverStorageNodes()
+        //   - selectBestNode()
+        //   - updateEndpoint()
+        //   - continue streaming
     }
 
     val stopIngestor = {
