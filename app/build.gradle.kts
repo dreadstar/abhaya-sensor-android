@@ -4,7 +4,6 @@ import java.util.*
 plugins {
     id("com.android.application")
     kotlin("android")
-    // Required for Kotlin 2.x when using Compose
     id("org.jetbrains.kotlin.plugin.compose") version "2.2.10"
 }
 
@@ -87,7 +86,8 @@ android {
     // variant-aware AAR repackaging and keeps compilation deterministic in the monorepo.
     sourceSets {
         getByName("main") {
-            aidl.srcDir(project(":meshrabiya-api").file("src/main/aidl"))
+            // aidl.srcDir(project(":meshrabiya-api").file("src/main/aidl"))
+            
         }
     }
 

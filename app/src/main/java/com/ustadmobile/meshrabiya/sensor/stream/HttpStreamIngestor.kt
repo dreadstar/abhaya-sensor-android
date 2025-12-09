@@ -15,7 +15,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * This implementation is intentionally small and test-friendly: it performs network calls on a
  * background coroutine scope and tolerates transient failures (logs them).
  */
-class HttpStreamIngestor(private val endpoint: String, private val token: String? = null) : StreamIngestor {
+class HttpStreamIngestor(private var endpoint: String, private val token: String? = null) : StreamIngestor {
     private val client = OkHttpClient()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile

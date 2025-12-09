@@ -133,11 +133,16 @@ fun SensorApp() {
         // Use mesh APIs to broadcast a request and collect responses
         // Each response includes node URL, latency, system state, etc.
         // Return list of candidate nodes
+        return listOf(
+            MeshNodeInfo(url = "https://example.com/store", latency = 10, systemState = "OK"),
+            MeshNodeInfo(url = "https://example.com/alt", latency = 20, systemState = "OK")
+        )
     }
 
     fun selectBestNode(candidates: List<MeshNodeInfo>): MeshNodeInfo {
         // Evaluate candidates based on latency, system state, etc.
         // Return the best node
+        return candidates.minByOrNull { it.latency } ?: MeshNodeInfo()
     }
 
     // Camera and audio capture controllers
@@ -229,7 +234,7 @@ fun SensorApp() {
                 try {
                     (ingestor as? UIIngestor)?.events?.collectLatest { ev ->
                         ingestLog.add(0, "${ev.streamId} @ ${ev.timestampMs} (${ev.payloadLength} bytes)")
-                        if (ingestLog.size > 200) ingestLog.removeLast()
+                        if (ingestLog.size > 200) ingestLog.removeAt(ingestLog.lastIndex)
                     }
                 } catch (_: Throwable) {}
             }
